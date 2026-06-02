@@ -16,7 +16,7 @@ def load_dvf_raw(years: list[int] | None = None) -> pd.DataFrame:
         years: Années à charger (défaut : DVF_YEARS depuis config)
 
     Returns:
-        DataFrame concaténé de toutes les années
+        DataFrame concaténé de toutes les années disponibles
     """
     years = years or DVF_YEARS
     dvf_dir = DATA_RAW_DIR / "dvf"
@@ -52,8 +52,16 @@ def load_dvf_clean() -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def load_dvf_joined() -> pd.DataFrame:
+    """Charger le fichier DVF enrichi (après jointures DPE + OSM + IRIS)."""
+    path = DATA_PROCESSED_DIR / "dvf_angers_joined.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-join")
+    return pd.read_parquet(path)
+
+
 def load_dvf_features() -> pd.DataFrame:
-    """Charger le fichier DVF avec toutes les features."""
+    """Charger le fichier DVF avec toutes les features ML."""
     path = DATA_PROCESSED_DIR / "dvf_angers_features.parquet"
     if not path.exists():
         raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-features")

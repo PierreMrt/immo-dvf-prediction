@@ -1,6 +1,6 @@
 # immo-dvf-prediction - Makefile
 
-.PHONY: help install dev lint format data-download data-clean data-features data-full train evaluate run-app clean
+.PHONY: help install dev lint format data-download data-clean data-join data-features data-full train evaluate run-app clean
 
 # ============================================
 # Aide
@@ -18,8 +18,9 @@ help: ## Afficher cette aide
 	@echo "  format     - Formater le code (black + ruff)"
 	@echo ""
 	@echo "Données:"
-	@echo "  data-download  - Télécharger données DVF + DPE + BPE"
+	@echo "  data-download  - Télécharger données DVF + DPE + OSM"
 	@echo "  data-clean     - Nettoyer données DVF"
+	@echo "  data-join      - Jointures DVF + DPE + OSM + IRIS"
 	@echo "  data-features  - Générer features engineering"
 	@echo "  data-full      - Pipeline complet données (download → features)"
 	@echo ""
@@ -61,11 +62,14 @@ format: ## Formater le code
 # Données
 # ============================================
 
-data-download: ## Télécharger données DVF + DPE + BPE
+data-download: ## Télécharger données DVF + DPE + OSM
 	python -m src.data.download
 
 data-clean: ## Nettoyer données DVF
 	python -m src.data.clean
+
+data-join: ## Jointures DVF + DPE + OSM + IRIS
+	python -m src.data.join
 
 data-features: ## Générer features engineering
 	python -m src.data.features
@@ -73,6 +77,7 @@ data-features: ## Générer features engineering
 data-full: ## Pipeline complet données
 	$(MAKE) data-download
 	$(MAKE) data-clean
+	$(MAKE) data-join
 	$(MAKE) data-features
 
 # ============================================
