@@ -13,7 +13,7 @@ def load_dvf_raw(years: list[int] | None = None) -> pd.DataFrame:
     Charger les fichiers DVF bruts pour les années demandées.
 
     Args:
-        years: Années à charger (défaut : config)
+        years: Années à charger (défaut : DVF_YEARS depuis config)
 
     Returns:
         DataFrame concaténé de toutes les années
@@ -25,7 +25,7 @@ def load_dvf_raw(years: list[int] | None = None) -> pd.DataFrame:
     for year in years:
         filepath = dvf_dir / f"dvf_{year}_{settings.department_code}.csv"
         if not filepath.exists():
-            logger.warning(f"Fichier DVF {year} introuvable : {filepath}")
+            logger.warning(f"Fichier DVF {year} introuvable : {filepath.name}")
             continue
         logger.info(f"Chargement {filepath.name}...")
         df = pd.read_csv(
@@ -37,7 +37,7 @@ def load_dvf_raw(years: list[int] | None = None) -> pd.DataFrame:
         dfs.append(df)
 
     if not dfs:
-        raise FileNotFoundError("Aucun fichier DVF trouvé. Lancer make data-download.")
+        raise FileNotFoundError("Aucun fichier DVF trouvé. Lancer : make data-download")
 
     result = pd.concat(dfs, ignore_index=True)
     logger.info(f"DVF brut chargé : {len(result):,} lignes")
@@ -48,7 +48,7 @@ def load_dvf_clean() -> pd.DataFrame:
     """Charger le fichier DVF nettoyé."""
     path = DATA_PROCESSED_DIR / "dvf_angers_appart_clean.parquet"
     if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-clean.")
+        raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-clean")
     return pd.read_parquet(path)
 
 
@@ -56,15 +56,15 @@ def load_dvf_features() -> pd.DataFrame:
     """Charger le fichier DVF avec toutes les features."""
     path = DATA_PROCESSED_DIR / "dvf_angers_features.parquet"
     if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-features.")
+        raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-features")
     return pd.read_parquet(path)
 
 
 def load_dpe() -> pd.DataFrame:
-    """Charger les données DPE Ademe."""
-    path = DATA_RAW_DIR / "dpe" / "dpe_france.parquet"
+    """Charger les données DPE ADEME."""
+    path = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-download.")
+        raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-download")
     return pd.read_parquet(path)
 
 
@@ -72,21 +72,5 @@ def load_bpe() -> pd.DataFrame:
     """Charger la Base Permanente des Équipements INSEE."""
     path = DATA_RAW_DIR / "bpe" / "bpe_insee.csv"
     if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-download.")
-    return pd.read_csv(path, dtype={"depcom": str, "dciris": str}, low_memory=False)
-
-
-def load_iris() -> pd.DataFrame:
-    """Charger la table d'appartenance géographique des IRIS INSEE."""
-    path = DATA_RAW_DIR / "iris" / "iris_insee.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-download.")
-    return pd.read_csv(path, dtype={"CODE_IRIS": str, "DEP": str}, low_memory=False)
-
-
-def load_copro() -> pd.DataFrame:
-    """Charger les données copropriétés."""
-    path = DATA_RAW_DIR / "copro" / "copro_api.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"{path} introuvable. Lancer make data-download.")
-    return pd.read_csv(path, low_memory=False)
+        raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-download")
+    return pd.read_csv(path, dtype={"DEPCOM": str, "DEP": str}, low_memory=False)
