@@ -10,16 +10,12 @@ from src.utils.config import DATA_PROCESSED_DIR, DATA_RAW_DIR
 from src.utils.logging import logger
 
 RAYON_EQUIPEMENTS_M = 500
-DPE_SEUIL_M = 50  # Distance max pour la jointure DPE (mètres)
+DPE_SEUIL_M = 50
 EPSG_WGS84 = 4326
-EPSG_LAMBERT = 2154  # Lambert-93 (mètres)
+EPSG_LAMBERT = 2154
 
 
 def join_iris(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Assigner le code IRIS à chaque vente DVF via jointure géospatiale.
-    Nécessite le fichier contours_iris_49.geojson dans data/raw/iris/.
-    """
     logger.info("Jointure IRIS...")
     iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
     if not iris_path.exists():
@@ -45,22 +41,12 @@ def join_iris(df: pd.DataFrame) -> pd.DataFrame:
 def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Joindre les données DPE au dataset DVF par nearest neighbor géospatial.
-
-    Stratégie :
-    - Convertir les deux datasets en Lambert-93 (mètres)
-    - sjoin_nearest avec distance max DPE_SEUIL_M (50m)
-    - En cas de plusieurs DPE dans le rayon, prendre le plus proche
-
-    Colonnes apportées :
-      etiquette_dpe, etiquette_ges, annee_construction,
-      conso_5_usages_par_m2_ep, emission_ges_5_usages_par_m2
+    Distance max : DPE_SEUIL_M mètres (Lambert-93).
     """
     logger.info(f"Jointure DPE (nearest neighbor, seuil {DPE_SEUIL_M}m)...")
     dpe = load_dpe()
 
-    # Vérifier que les coordonnées DPE sont disponibles
-    x_col = "coordonnee_cartographique_x_ban"
-    y_col = "coordonnee_cartographique_y_ban"
+    x_col, y_col = "coordonnee_cartographique_x_ban", "coordonnee_cartographique_y_ban"
     if x_col not in dpe.columns or y_col not in dpe.columns:
         logger.warning("⚠ Coordonnées DPE manquantes, jointure ignorée")
         return df
@@ -69,29 +55,27 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"  DPE avec coordonnées : {len(dpe_valid):,} / {len(dpe):,}")
 
     dpe_cols_keep = [
-        "etiquette_dpe",
-        "etiquette_ges",
-        "annee_construction",
-        "conso_5_usages_par_m2_ep",
-        "emission_ges_5_usages_par_m2",
+        "etiquette_dpe", "etiquette_ges", "annee_construction",
+        "conso_5_usages_par_m2_ep", "emission_ges_5_usages_par_m2",
     ]
     dpe_cols_available = [c for c in dpe_cols_keep if c in dpe_valid.columns]
 
-    # GeoDataFrame DPE : coordonnées déjà en Lambert-93
     gdf_dpe = gpd.GeoDataFrame(
         dpe_valid[dpe_cols_available],
         geometry=gpd.points_from_xy(dpe_valid[x_col], dpe_valid[y_col]),
         crs=EPSG_LAMBERT,
-    )
+    ).reset_index(drop=True)
 
-    # GeoDataFrame DVF : WGS84 → Lambert-93
+    # Conserver l'index DVF original pour la déduplication
+    df = df.reset_index(drop=True).copy()
+    df["_dvf_idx"] = df.index
+
     gdf_dvf = gpd.GeoDataFrame(
         df,
         geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
         crs=EPSG_WGS84,
     ).to_crs(EPSG_LAMBERT)
 
-    # Nearest neighbor avec seuil
     joined = gpd.sjoin_nearest(
         gdf_dvf,
         gdf_dpe,
@@ -100,11 +84,16 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
         distance_col="_dpe_dist_m",
     )
 
-    # sjoin_nearest peut dupliquer des lignes si égalité de distance → garder le plus proche
-    joined = joined.sort_values("_dpe_dist_m").drop_duplicates(subset=df.index.name or joined.index.name if df.index.name else joined.index)
-    joined = joined.iloc[:len(df)]  # sécurité : même nombre de lignes
+    # En cas de doublons (plusieurs DPE à égalité), garder le plus proche
+    joined = (
+        joined
+        .sort_values("_dpe_dist_m")
+        .drop_duplicates(subset="_dvf_idx", keep="first")
+        .set_index("_dvf_idx")
+        .sort_index()
+    )
 
-    result = df.copy()
+    result = df.drop(columns=["_dvf_idx"]).copy()
     for col in dpe_cols_available:
         result[col] = joined[col].values
 
@@ -114,9 +103,6 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def join_equipements_osm(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compter les équipements OSM dans un rayon de 500m autour de chaque vente DVF.
-    """
     logger.info(f"Jointure équipements OSM (rayon {RAYON_EQUIPEMENTS_M}m)...")
     osm = load_equipements_osm()
 
@@ -152,7 +138,6 @@ def join_equipements_osm(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_all_joins(df: pd.DataFrame) -> pd.DataFrame:
-    """Exécuter toutes les jointures dans l'ordre."""
     df = join_iris(df)
     df = join_dpe(df)
     df = join_equipements_osm(df)
