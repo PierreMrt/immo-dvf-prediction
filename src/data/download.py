@@ -1,17 +1,16 @@
 """
-Téléchargement des données DVF, DPE et BPE depuis leurs URLs stables.
+Téléchargement des données DVF, DPE et BPE/OSM depuis leurs URLs stables.
 
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
-- BPE 2024 avec coord. : https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip
-  (page source : https://www.insee.fr/fr/statistiques/8217525?sommaire=8217537)
+- Équipements OSM : Overpass API (remplace BPE INSEE)
 """
 
 import gzip
+import json
 import shutil
-import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -21,30 +20,24 @@ from src.utils.config import DATA_RAW_DIR, DVF_YEARS, settings
 from src.utils.logging import logger
 
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz"
-BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip"
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# Colonnes à récupérer depuis le dataset dpe03existant
-# Référence schema : curl https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines?size=1
-DPE_SELECT_COLS = ",".join([
-    "numero_dpe",
-    "date_etablissement_dpe",
-    "adresse_ban",
-    "code_postal_ban",
-    "nom_commune_ban",
-    "etiquette_dpe",                       # classe énergie (A-G)
-    "etiquette_ges",
-    "annee_construction",
-    "surface_habitable_immeuble",           # surface disponible dans dpe03existant
-    "consommation_energie_primaire",
-    "emission_ges_5_usages_par_m2",         # émissions GES par m²
-    "conso_5_usages_par_m2_ep",            # conso énergie primaire par m²
-    "coordonnee_cartographique_x_ban",     # Lambert-93 X
-    "coordonnee_cartographique_y_ban",     # Lambert-93 Y
-    "periode_construction",
-    "type_batiment",
-])
+# Bounding box département Maine-et-Loire (49)
+# lat_min, lon_min, lat_max, lon_max
+BBOX_49 = (47.10, -1.00, 47.90, -0.10)
+
+# Catégories OSM d'intérêt et leur colonne de sortie
+OSM_CATEGORIES: dict[str, str] = {
+    'node["shop"](bbox)': "commerces",
+    'node["amenity"="restaurant"](bbox)': "restaurants",
+    'node["amenity"="fast_food"](bbox)': "restaurants",  # groupé avec restaurants
+    'node["amenity"="school"](bbox)': "ecoles",
+    'node["amenity"="kindergarten"](bbox)': "ecoles",
+    'node["leisure"="park"](bbox)': "parcs",
+    'node["leisure"="garden"](bbox)': "parcs",
+}
 
 
 def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
@@ -61,9 +54,7 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
     """
     Télécharger les DVF géolocalisées pour le département configuré.
     Les fichiers .csv.gz sont décompressés automatiquement en .csv.
-
-    Note : les DVF sont publiées avec un décalage d'environ 6 mois.
-    L'année N n'est généralement disponible que courant N+1.
+    L'année N est généralement disponible courant N+1.
     """
     years = years or DVF_YEARS
     dep = settings.department_code
@@ -83,9 +74,7 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
             _download_stream(url, dest_gz)
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                logger.warning(
-                    f"⚠ DVF {year} non disponible (publiée avec décalage, réessayer plus tard)"
-                )
+                logger.warning(f"⚠ DVF {year} non disponible (publiée avec décalage, réessayer plus tard)")
             else:
                 logger.error(f"✗ Erreur DVF {year} : {e}")
             if dest_gz.exists():
@@ -106,8 +95,8 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
 def download_dpe(code_postal_prefix: str = "490") -> None:
     """
     Télécharger les DPE (depuis juillet 2021) via l'API ADEME par pagination.
-    Filtre sur le code postal pour ne garder qu'Angers et environs.
-    Dataset : dpe03existant
+    Filtre sur le code postal. Toutes les colonnes sont récupérées (pas de select)
+    pour éviter les erreurs 400 liées aux noms de colonnes.
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -121,8 +110,26 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         "size": DPE_BATCH_SIZE,
         "q": code_postal_prefix,
         "q_fields": "code_postal_ban",
-        "select": DPE_SELECT_COLS,
     }
+
+    # Colonnes à conserver après téléchargement (noms confirmés via l'API)
+    COLS_TO_KEEP = [
+        "numero_dpe",
+        "date_etablissement_dpe",
+        "adresse_ban",
+        "code_postal_ban",
+        "nom_commune_ban",
+        "etiquette_dpe",
+        "etiquette_ges",
+        "annee_construction",
+        "surface_habitable_immeuble",
+        "conso_5_usages_par_m2_ep",
+        "emission_ges_5_usages_par_m2",
+        "coordonnee_cartographique_x_ban",
+        "coordonnee_cartographique_y_ban",
+        "periode_construction",
+        "type_batiment",
+    ]
 
     dfs: list[pd.DataFrame] = []
     after = None
@@ -136,7 +143,8 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
             r.raise_for_status()
             data = r.json()
         except requests.HTTPError as e:
-            logger.error(f"✗ Erreur DPE page {page} ({e.response.status_code if e.response else '?'}) : {e}")
+            status = e.response.status_code if e.response else "?"
+            logger.error(f"✗ Erreur DPE page {page} ({status}) : {e}")
             break
         except requests.RequestException as e:
             logger.error(f"✗ Erreur DPE page {page} : {e}")
@@ -146,7 +154,11 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         if not results:
             break
 
-        dfs.append(pd.DataFrame(results))
+        df_page = pd.DataFrame(results)
+        # Garder uniquement les colonnes disponibles parmi celles souhaitées
+        cols = [c for c in COLS_TO_KEEP if c in df_page.columns]
+        dfs.append(df_page[cols])
+
         logger.info(f"  Page {page} : {len(results)} enregistrements")
         after = data.get("next")
         if not after:
@@ -161,47 +173,82 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         logger.warning("⚠ Aucune donnée DPE récupérée")
 
 
-def download_bpe() -> None:
+def download_equipements_osm(bbox: tuple[float, float, float, float] | None = None) -> None:
     """
-    Télécharger la BPE 2024 (avec coordonnées Lambert-93) depuis l'INSEE.
-    Filtre sur le département configuré après extraction du ZIP.
-    Source : https://www.insee.fr/fr/statistiques/8217525?sommaire=8217537
+    Télécharger les équipements urbains via Overpass API (OpenStreetMap).
+    Remplace la BPE INSEE.
+
+    Args:
+        bbox: (lat_min, lon_min, lat_max, lon_max) — défaut : Maine-et-Loire
     """
-    dest = DATA_RAW_DIR / "bpe" / "bpe_insee.csv"
+    dest = DATA_RAW_DIR / "osm" / "equipements_osm.parquet"
     if dest.exists():
-        logger.info(f"BPE déjà présent, saut ({dest.name})")
+        logger.info(f"Equipements OSM déjà présents, saut ({dest.name})")
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest_zip = DATA_RAW_DIR / "bpe" / "bpe24_ensemble_xy.zip"
+    bbox = bbox or BBOX_49
+    bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
 
-    logger.info("Téléchargement BPE 2024 INSEE...")
+    # Construction de la requête Overpass QL
+    filters = [
+        f'node["shop"]({bbox_str})',
+        f'node["amenity"="restaurant"]({bbox_str})',
+        f'node["amenity"="fast_food"]({bbox_str})',
+        f'node["amenity"="school"]({bbox_str})',
+        f'node["amenity"="kindergarten"]({bbox_str})',
+        f'node["leisure"="park"]({bbox_str})',
+        f'node["leisure"="garden"]({bbox_str})',
+    ]
+    query = f"[out:json][timeout:120];\n({chr(10).join(filters)});\nout center;"
+
+    logger.info(f"Téléchargement équipements OSM (bbox {bbox_str})...")
     try:
-        _download_stream(BPE_URL, dest_zip)
+        r = requests.post(OVERPASS_URL, data=query, timeout=120)
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
     except requests.RequestException as e:
-        logger.error(f"✗ Erreur BPE : {e}")
+        logger.error(f"✗ Erreur Overpass : {e}")
         return
 
-    with zipfile.ZipFile(dest_zip, "r") as z:
-        csv_files = [f for f in z.namelist() if f.endswith(".csv")]
-        if not csv_files:
-            logger.error("✗ Aucun CSV trouvé dans le ZIP BPE")
-            dest_zip.unlink()
-            return
-        with z.open(csv_files[0]) as f:
-            df = pd.read_csv(f, sep=";", dtype={"DEPCOM": str, "DEP": str}, low_memory=False)
+    if not elements:
+        logger.warning("⚠ Aucun équipement OSM récupéré")
+        return
 
-    dest_zip.unlink()
-    df_dep = df[df["DEP"] == settings.department_code].reset_index(drop=True)
-    df_dep.to_csv(dest, index=False)
-    logger.info(f"✓ BPE téléchargé : {len(df_dep):,} équipements (dép. {settings.department_code}) → {dest.name}")
+    rows = []
+    for el in elements:
+        tags = el.get("tags", {})
+        # Déterminer la catégorie
+        if "shop" in tags:
+            categorie = "commerce"
+        elif tags.get("amenity") in ("restaurant", "fast_food"):
+            categorie = "restaurant"
+        elif tags.get("amenity") in ("school", "kindergarten"):
+            categorie = "ecole"
+        elif tags.get("leisure") in ("park", "garden"):
+            categorie = "parc"
+        else:
+            continue
+        rows.append({
+            "osm_id": el["id"],
+            "lat": el.get("lat") or el.get("center", {}).get("lat"),
+            "lon": el.get("lon") or el.get("center", {}).get("lon"),
+            "categorie": categorie,
+            "nom": tags.get("name", ""),
+        })
+
+    df = pd.DataFrame(rows).dropna(subset=["lat", "lon"])
+    df.to_parquet(dest, index=False)
+    logger.info(f"✓ Équipements OSM téléchargés : {len(df):,} éléments → {dest.name}")
+    for cat in ["commerce", "restaurant", "ecole", "parc"]:
+        logger.info(f"   {cat} : {(df['categorie'] == cat).sum():,}")
 
 
 def download_all() -> None:
     """Télécharger toutes les sources de données."""
     download_dvf_geolocalisees()
     download_dpe()
-    download_bpe()
+    download_equipements_osm()
 
 
 if __name__ == "__main__":

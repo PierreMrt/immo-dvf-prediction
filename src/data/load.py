@@ -68,9 +68,9 @@ def load_dpe() -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
-def load_bpe() -> pd.DataFrame:
-    """Charger la Base Permanente des Équipements INSEE."""
-    path = DATA_RAW_DIR / "bpe" / "bpe_insee.csv"
+def load_equipements_osm() -> pd.DataFrame:
+    """Charger les équipements OSM (Overpass API)."""
+    path = DATA_RAW_DIR / "osm" / "equipements_osm.parquet"
     if not path.exists():
         raise FileNotFoundError(f"{path.name} introuvable. Lancer : make data-download")
-    return pd.read_csv(path, dtype={"DEPCOM": str, "DEP": str}, low_memory=False)
+    return pd.read_parquet(path)
