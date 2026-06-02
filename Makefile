@@ -95,7 +95,7 @@ evaluate: ## Évaluer les modèles
 # ============================================
 
 run-app: ## Lancer application Streamlit
-	streamlit run app/streamlit_app.py
+	PYTHONPATH=$(CURDIR) streamlit run app/streamlit_app.py
 
 # ============================================
 # Nettoyage
