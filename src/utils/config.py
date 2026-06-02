@@ -5,13 +5,10 @@ Utilise pydantic-settings pour valider les variables d'environnement.
 
 import json
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings
-from dotenv import load_dotenv
-
-load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -21,13 +18,13 @@ class Settings(BaseSettings):
     app_name: str = Field("immo-dvf-prediction")
     app_version: str = Field("0.1.0")
 
-    # Chemins de données
+    # Chemins de données (relatifs à la racine du projet)
     data_raw_dir: Path = Field(Path("data/raw"))
     data_processed_dir: Path = Field(Path("data/processed"))
     models_dir: Path = Field(Path("models"))
 
     # dvf_years stocké en str pour éviter le pré-parsing JSON de pydantic-settings.
-    # La propriété dvf_years_parsed expose la liste d'entiers.
+    # Utiliser dvf_years_list pour obtenir la liste d'entiers.
     dvf_years: str = Field(default="2024,2025,2026")
 
     city_code_insee: str = Field("49007")
@@ -35,7 +32,8 @@ class Settings(BaseSettings):
 
     # Configuration ML
     random_seed: int = Field(42)
-    train_test_split: float = Field(0.8)
+    # test_size : fraction du dataset réservée au test (ex: 0.2 = 20% test, 80% train)
+    test_size: float = Field(0.2)
     default_model: str = Field("xgboost")
 
     # Logging
@@ -45,7 +43,10 @@ class Settings(BaseSettings):
     # API Keys
     openai_api_key: Optional[str] = Field(None)
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+    }
 
     @property
     def dvf_years_list(self) -> List[int]:
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
         return [int(x.strip()) for x in v.split(",") if x.strip()]
 
 
-# Instance singleton des settings
+# Instance singleton
 settings = Settings()
 
 # Alias pratique utilisé dans tout le projet

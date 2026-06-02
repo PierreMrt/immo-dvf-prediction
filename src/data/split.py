@@ -9,7 +9,7 @@ from src.data.load import load_dvf_features
 from src.utils.config import DATA_PROCESSED_DIR, settings
 from src.utils.logging import logger
 
-# Colonnes à utiliser comme features (enrichi progressivement)
+# Colonnes utilisées comme features (enrichi progressivement)
 BASE_FEATURES = [
     "surface_m2",
     "nombre_pieces",
@@ -41,8 +41,7 @@ TARGET = "prix_m2"
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
     """Retourner les colonnes de features disponibles dans le DataFrame."""
-    all_features = BASE_FEATURES + OPTIONAL_FEATURES
-    return [col for col in all_features if col in df.columns]
+    return [col for col in BASE_FEATURES + OPTIONAL_FEATURES if col in df.columns]
 
 
 def split_dataset() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -63,7 +62,7 @@ def split_dataset() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     logger.info(f"Échantillons disponibles : {len(X):,}")
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=1 - settings.train_test_split, random_state=settings.random_seed
+        X, y, test_size=settings.test_size, random_state=settings.random_seed
     )
 
     # Sauvegarder les splits
