@@ -5,7 +5,7 @@ Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
-- Équipements OSM : Overpass API (remplace BPE INSEE)
+- Équipements OSM : Overpass API kumi.systems
 """
 
 import gzip
@@ -21,10 +21,9 @@ from src.utils.logging import logger
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz"
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# Bounding box département Maine-et-Loire (49)
-# (lat_min, lon_min, lat_max, lon_max)
+# Bounding box département Maine-et-Loire (49) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_49 = (47.10, -1.00, 47.90, -0.10)
 
 # Colonnes à conserver depuis dpe03existant (noms confirmés via API)
@@ -102,7 +101,8 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
 def download_dpe(code_postal_prefix: str = "490") -> None:
     """
     Télécharger les DPE (depuis juillet 2021) via l'API ADEME par pagination.
-    Filtre sur le préfixe de code postal via le paramètre code_postal_ban_starts.
+    Filtre sur le préfixe de code postal via code_postal_ban_starts.
+    La pagination suit directement l'URL 'next' retournée par l'API.
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -112,20 +112,17 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"Téléchargement DPE ADEME (code postal {code_postal_prefix}*)...")
 
-    params: dict = {
-        "size": DPE_BATCH_SIZE,
-        "code_postal_ban_starts": code_postal_prefix,
-    }
+    # URL initiale avec filtre
+    next_url: str | None = (
+        f"{DPE_API_URL}?size={DPE_BATCH_SIZE}&code_postal_ban_starts={code_postal_prefix}"
+    )
 
     dfs: list[pd.DataFrame] = []
-    after = None
     page = 1
 
-    while True:
-        if after:
-            params["after"] = after
+    while next_url:
         try:
-            r = requests.get(DPE_API_URL, params=params, timeout=60)
+            r = requests.get(next_url, timeout=60)
             r.raise_for_status()
             data = r.json()
         except requests.HTTPError as e:
@@ -143,11 +140,10 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         df_page = pd.DataFrame(results)
         cols = [c for c in DPE_COLS_TO_KEEP if c in df_page.columns]
         dfs.append(df_page[cols])
-
         logger.info(f"  Page {page} : {len(results)} enregistrements")
-        after = data.get("next")
-        if not after:
-            break
+
+        # next est une URL complète prête à appeler
+        next_url = data.get("next")
         page += 1
 
     if dfs:
@@ -160,7 +156,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
 def download_equipements_osm(bbox: tuple[float, float, float, float] | None = None) -> None:
     """
-    Télécharger les équipements urbains via Overpass API (OpenStreetMap).
+    Télécharger les équipements urbains via Overpass API (instance kumi.systems).
     Remplace la BPE INSEE.
 
     Args:
@@ -188,8 +184,7 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
 
     logger.info(f"Téléchargement équipements OSM (bbox {bbox_str})...")
     try:
-        # Overpass attend le paramètre 'data' en form-encoded
-        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=120)
+        r = requests.get(OVERPASS_URL, params={"data": query}, timeout=120)
         r.raise_for_status()
         elements = r.json().get("elements", [])
     except requests.RequestException as e:
