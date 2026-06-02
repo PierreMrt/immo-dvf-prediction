@@ -6,8 +6,8 @@ Utilise LangChain + OpenAI pour parser le texte brut de l'annonce.
 import json
 from typing import Optional
 
+from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 
 from src.agents.scraper import fetch_annonce_text
@@ -105,7 +105,7 @@ class AnnonceParser:
         Returns:
             AppartementInput utilisable par ImmoPricePredictor
         """
-        from src.data.features import DPE_ORDINAL, ANNEE_REF
+        from src.data.features import ANNEE_REF, DPE_ORDINAL
 
         dpe_ordinal = DPE_ORDINAL.get(features.dpe_classe) if features.dpe_classe else None
         dpe_bonus = int(features.dpe_classe in ["A", "B"]) if features.dpe_classe else None
