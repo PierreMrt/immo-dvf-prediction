@@ -20,5 +20,6 @@ langchain>=0.1.0
 langchain-openai>=0.0.5
 python-dotenv>=1.0.0
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
 pyarrow>=14.0.0
 pyogrio>=0.7.0
