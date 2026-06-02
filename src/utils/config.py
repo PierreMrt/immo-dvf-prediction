@@ -5,9 +5,9 @@ Utilise pydantic-settings pour valider les variables d'environnement.
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     models_dir: Path = Field(Path("models"), description="Répertoire modèles ML")
 
     # Configuration données
+    # Accepte "2024,2025,2026" (CSV) ou "[2024,2025,2026]" (JSON) depuis le .env
     dvf_years: List[int] = Field(
         default=[2024, 2025, 2026], description="Années DVF à télécharger"
     )
@@ -46,6 +47,24 @@ class Settings(BaseSettings):
 
     # API Keys
     openai_api_key: Optional[str] = Field(None, description="OpenAI API key")
+
+    @field_validator("dvf_years", mode="before")
+    @classmethod
+    def parse_dvf_years(cls, v: Any) -> List[int]:
+        """
+        Accepte trois formats depuis le .env :
+          - liste Python déjà déserialisée : [2024, 2025, 2026]
+          - JSON string            : "[2024,2025,2026]"
+          - CSV string             : "2024,2025,2026"
+        """
+        if isinstance(v, list):
+            return [int(x) for x in v]
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                return [int(x) for x in json.loads(v)]
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        return v
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
