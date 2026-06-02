@@ -4,9 +4,9 @@ Téléchargement des données DVF, DPE et BPE depuis leurs URLs stables.
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
-- DPE (depuis juil. 2021) : API ADEME https://data.ademe.fr/data-fair/api/v1/datasets/dpe-v2-logements-existants/lines
-- BPE 2024 avec coord. : https://www.insee.fr/fr/statistiques/fichier/8217527/bpe24_ensemble_xy_csv.zip
-  (page parente : https://www.insee.fr/fr/statistiques/8217527?sommaire=8217537)
+- DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
+- BPE 2024 avec coord. : https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip
+  (page source : https://www.insee.fr/fr/statistiques/8217525?sommaire=8217537)
 """
 
 import gzip
@@ -21,9 +21,24 @@ from src.utils.config import DATA_RAW_DIR, DVF_YEARS, settings
 from src.utils.logging import logger
 
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz"
-BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217527/bpe24_ensemble_xy_csv.zip"
-DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe-v2-logements-existants/lines"
+BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip"
+DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
+
+# Colonnes disponibles dans le dataset dpe03existant (juillet 2021+)
+DPE_SELECT_COLS = ",".join([
+    "numero_dpe",
+    "date_etablissement_dpe",
+    "adresse_ban",
+    "code_postal_ban",
+    "nom_commune_ban",
+    "etiquette_dpe",           # classe énergie (A–G) dans dpe03existant
+    "etiquette_ges",
+    "annee_construction",
+    "surface_habitable_logement",
+    "consommation_energie_primaire",
+    "emission_ges_energie_primaire",
+])
 
 
 def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
@@ -86,6 +101,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
     """
     Télécharger les DPE (depuis juillet 2021) via l'API ADEME par pagination.
     Filtre sur le code postal pour ne garder qu'Angers et environs.
+    Dataset : dpe03existant (remplace dpe-v2-logements-existants depuis 2025)
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -99,19 +115,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         "size": DPE_BATCH_SIZE,
         "q": code_postal_prefix,
         "q_fields": "code_postal_ban",
-        "select": ",".join([
-            "numero_dpe",
-            "date_etablissement_dpe",
-            "adresse_ban",
-            "code_postal_ban",
-            "nom_commune_ban",
-            "classe_energie",
-            "etiquette_ges",
-            "annee_construction",
-            "surface_habitable_logement",
-            "consommation_energie_primaire",
-            "emission_ges_energie_primaire",
-        ]),
+        "select": DPE_SELECT_COLS,
     }
 
     dfs: list[pd.DataFrame] = []
@@ -126,8 +130,8 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
             r.raise_for_status()
             data = r.json()
         except requests.HTTPError as e:
-            logger.error(f"✗ Erreur DPE page {page} : {e}")
-            logger.error(f"  URL appelée : {e.response.url if e.response else DPE_API_URL}")
+            logger.error(f"✗ Erreur DPE page {page} ({e.response.status_code}) : {e}")
+            logger.error(f"  URL : {r.url}")
             break
         except requests.RequestException as e:
             logger.error(f"✗ Erreur DPE page {page} : {e}")
@@ -146,6 +150,9 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
     if dfs:
         df = pd.concat(dfs, ignore_index=True)
+        # Normaliser le nom de la colonne classe énergie
+        if "etiquette_dpe" in df.columns and "classe_energie" not in df.columns:
+            df = df.rename(columns={"etiquette_dpe": "classe_energie"})
         df.to_parquet(dest, index=False)
         logger.info(f"✓ DPE téléchargé : {len(df):,} lignes → {dest.name}")
     else:
@@ -156,7 +163,7 @@ def download_bpe() -> None:
     """
     Télécharger la BPE 2024 (avec coordonnées Lambert-93) depuis l'INSEE.
     Filtre sur le département configuré après extraction du ZIP.
-    Source : https://www.insee.fr/fr/statistiques/8217527?sommaire=8217537
+    Source : https://www.insee.fr/fr/statistiques/8217525?sommaire=8217537
     """
     dest = DATA_RAW_DIR / "bpe" / "bpe_insee.csv"
     if dest.exists():
