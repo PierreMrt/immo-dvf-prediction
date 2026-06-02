@@ -1,0 +1,1 @@
+"""Utilitaires transverses du projet."""
