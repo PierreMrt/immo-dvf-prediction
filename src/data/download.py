@@ -1,5 +1,5 @@
 """
-Téléchargement des données DVF, DPE et BPE/OSM depuis leurs URLs stables.
+Téléchargement des données DVF, DPE et équipements OSM depuis leurs URLs stables.
 
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
@@ -9,7 +9,6 @@ Sources :
 """
 
 import gzip
-import json
 import shutil
 from pathlib import Path
 
@@ -25,19 +24,27 @@ DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # Bounding box département Maine-et-Loire (49)
-# lat_min, lon_min, lat_max, lon_max
+# (lat_min, lon_min, lat_max, lon_max)
 BBOX_49 = (47.10, -1.00, 47.90, -0.10)
 
-# Catégories OSM d'intérêt et leur colonne de sortie
-OSM_CATEGORIES: dict[str, str] = {
-    'node["shop"](bbox)': "commerces",
-    'node["amenity"="restaurant"](bbox)': "restaurants",
-    'node["amenity"="fast_food"](bbox)': "restaurants",  # groupé avec restaurants
-    'node["amenity"="school"](bbox)': "ecoles",
-    'node["amenity"="kindergarten"](bbox)': "ecoles",
-    'node["leisure"="park"](bbox)': "parcs",
-    'node["leisure"="garden"](bbox)': "parcs",
-}
+# Colonnes à conserver depuis dpe03existant (noms confirmés via API)
+DPE_COLS_TO_KEEP = [
+    "numero_dpe",
+    "date_etablissement_dpe",
+    "adresse_ban",
+    "code_postal_ban",
+    "nom_commune_ban",
+    "etiquette_dpe",
+    "etiquette_ges",
+    "annee_construction",
+    "surface_habitable_immeuble",
+    "conso_5_usages_par_m2_ep",
+    "emission_ges_5_usages_par_m2",
+    "coordonnee_cartographique_x_ban",
+    "coordonnee_cartographique_y_ban",
+    "periode_construction",
+    "type_batiment",
+]
 
 
 def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
@@ -95,8 +102,7 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
 def download_dpe(code_postal_prefix: str = "490") -> None:
     """
     Télécharger les DPE (depuis juillet 2021) via l'API ADEME par pagination.
-    Filtre sur le code postal. Toutes les colonnes sont récupérées (pas de select)
-    pour éviter les erreurs 400 liées aux noms de colonnes.
+    Filtre sur le préfixe de code postal via le paramètre code_postal_ban_starts.
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -108,28 +114,8 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
     params: dict = {
         "size": DPE_BATCH_SIZE,
-        "q": code_postal_prefix,
-        "q_fields": "code_postal_ban",
+        "code_postal_ban_starts": code_postal_prefix,
     }
-
-    # Colonnes à conserver après téléchargement (noms confirmés via l'API)
-    COLS_TO_KEEP = [
-        "numero_dpe",
-        "date_etablissement_dpe",
-        "adresse_ban",
-        "code_postal_ban",
-        "nom_commune_ban",
-        "etiquette_dpe",
-        "etiquette_ges",
-        "annee_construction",
-        "surface_habitable_immeuble",
-        "conso_5_usages_par_m2_ep",
-        "emission_ges_5_usages_par_m2",
-        "coordonnee_cartographique_x_ban",
-        "coordonnee_cartographique_y_ban",
-        "periode_construction",
-        "type_batiment",
-    ]
 
     dfs: list[pd.DataFrame] = []
     after = None
@@ -155,8 +141,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
             break
 
         df_page = pd.DataFrame(results)
-        # Garder uniquement les colonnes disponibles parmi celles souhaitées
-        cols = [c for c in COLS_TO_KEEP if c in df_page.columns]
+        cols = [c for c in DPE_COLS_TO_KEEP if c in df_page.columns]
         dfs.append(df_page[cols])
 
         logger.info(f"  Page {page} : {len(results)} enregistrements")
@@ -190,7 +175,6 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
     bbox = bbox or BBOX_49
     bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
 
-    # Construction de la requête Overpass QL
     filters = [
         f'node["shop"]({bbox_str})',
         f'node["amenity"="restaurant"]({bbox_str})',
@@ -200,11 +184,12 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
         f'node["leisure"="park"]({bbox_str})',
         f'node["leisure"="garden"]({bbox_str})',
     ]
-    query = f"[out:json][timeout:120];\n({chr(10).join(filters)});\nout center;"
+    query = "[out:json][timeout:120];\n(\n" + "\n".join(f"  {f};" for f in filters) + "\n);\nout center;"
 
     logger.info(f"Téléchargement équipements OSM (bbox {bbox_str})...")
     try:
-        r = requests.post(OVERPASS_URL, data=query, timeout=120)
+        # Overpass attend le paramètre 'data' en form-encoded
+        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=120)
         r.raise_for_status()
         elements = r.json().get("elements", [])
     except requests.RequestException as e:
@@ -218,7 +203,6 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
     rows = []
     for el in elements:
         tags = el.get("tags", {})
-        # Déterminer la catégorie
         if "shop" in tags:
             categorie = "commerce"
         elif tags.get("amenity") in ("restaurant", "fast_food"):
