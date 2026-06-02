@@ -1,0 +1,52 @@
+# Données brutes (trop lourdes pour Git)
+data/raw/**/*.csv
+data/raw/**/*.parquet
+data/raw/**/*.geojson
+data/raw/**/*.zip
+
+# Données processées (générées, peuvent être re-générées)
+data/processed/**/*.parquet
+data/processed/**/*.csv
+
+# Modèles (fichiers lourds)
+models/*.pkl
+models/*.joblib
+models/*.onnx
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# mypy
+.mypy_cache/

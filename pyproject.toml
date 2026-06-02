@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "immo-dvf-prediction"
+version = "0.1.0"
+description = "Predict apartment prices in Angers using DVF open data, XGBoost and LLM agents"
+authors = [
+    {name = "PierreMrt", email = ""}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "polars>=0.19.0",
+    "scikit-learn>=1.3.0",
+    "xgboost>=2.0.0",
+    "lightgbm>=4.0.0",
+    "joblib>=1.3.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.0",
+    "plotly>=5.17.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "geopandas>=0.13.0",
+    "shapely>=2.0.0",
+    "rtree>=1.0.0",
+    "streamlit>=1.28.0",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.5",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pyarrow>=14.0.0",
+    "pyogrio>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.11.0",
+    "ruff>=0.1.6",
+    "mypy>=1.7.0",
+    "pre-commit>=3.5.0",
+]
+
+[tool.setuptools]
+packages = ["src", "src.data", "src.models", "src.agents", "src.utils", "src.visualization"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP"]
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
