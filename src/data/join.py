@@ -4,7 +4,6 @@ Jointures entre DVF et sources externes : DPE, OSM (équipements), IRIS.
 
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import Point
 
 from src.data.load import load_dpe, load_dvf_clean, load_equipements_osm
 from src.utils.config import DATA_PROCESSED_DIR, DATA_RAW_DIR
@@ -12,7 +11,7 @@ from src.utils.logging import logger
 
 RAYON_EQUIPEMENTS_M = 500
 EPSG_WGS84 = 4326
-EPSG_LAMBERT = 2154  # Lambert-93 (mètres)
+EPSG_LAMBERT = 2154
 
 
 def join_iris(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,12 +59,21 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
         .str.upper().str.strip()
         .str.replace(r"[^A-Z0-9 ]", "", regex=True)
     )
+
     df = df.copy()
-    df["adresse_norm"] = (
-        (df["numero_voie"].fillna("").astype(str) + " " + df["nom_voie"].fillna(""))
-        .str.upper().str.strip()
-        .str.replace(r"[^A-Z0-9 ]", "", regex=True)
-    )
+    # Colonnes d'adresse DVF brutes (non renommées par clean.py)
+    num_col = next((c for c in ["adresse_numero", "numero_voie"] if c in df.columns), None)
+    voie_col = next((c for c in ["adresse_nom_voie", "nom_voie"] if c in df.columns), None)
+
+    if num_col and voie_col:
+        df["adresse_norm"] = (
+            (df[num_col].fillna("").astype(str) + " " + df[voie_col].fillna(""))
+            .str.upper().str.strip()
+            .str.replace(r"[^A-Z0-9 ]", "", regex=True)
+        )
+    else:
+        logger.warning("⚠ Colonnes d'adresse DVF introuvables, jointure DPE ignorée")
+        return df
 
     dpe_cols = [
         "adresse_norm",
@@ -91,7 +99,6 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
 def join_equipements_osm(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compter les équipements OSM dans un rayon de 500m autour de chaque vente DVF.
-    Utilise les coordonnées WGS84 des équipements (lat/lon) converties en Lambert-93.
     """
     logger.info(f"Jointure équipements OSM (rayon {RAYON_EQUIPEMENTS_M}m)...")
     osm = load_equipements_osm()
