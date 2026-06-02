@@ -5,12 +5,12 @@ Jointures entre DVF et sources externes : DPE, OSM (équipements), IRIS.
 import geopandas as gpd
 import pandas as pd
 
+from src.data.clean import normalize_adresse_ban
 from src.data.load import load_dpe, load_dvf_clean, load_equipements_osm
 from src.utils.config import DATA_PROCESSED_DIR, DATA_RAW_DIR
 from src.utils.logging import logger
 
 RAYON_EQUIPEMENTS_M = 500
-DPE_SEUIL_M = 50
 EPSG_WGS84 = 4326
 EPSG_LAMBERT = 2154
 
@@ -40,66 +40,58 @@ def join_iris(df: pd.DataFrame) -> pd.DataFrame:
 
 def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Joindre les données DPE au dataset DVF par nearest neighbor géospatial.
-    Distance max : DPE_SEUIL_M mètres (Lambert-93).
-    """
-    logger.info(f"Jointure DPE (nearest neighbor, seuil {DPE_SEUIL_M}m)...")
-    dpe = load_dpe()
+    Joindre les données DPE au dataset DVF par adresse normalisée.
 
-    x_col, y_col = "coordonnee_cartographique_x_ban", "coordonnee_cartographique_y_ban"
-    if x_col not in dpe.columns or y_col not in dpe.columns:
-        logger.warning("⚠ Coordonnées DPE manquantes, jointure ignorée")
+    Prérequis : df doit contenir la colonne 'adresse_norm' (produite par clean.py).
+
+    Stratégie :
+    - Normaliser adresse_ban DPE via normalize_adresse_ban() (clean.py)
+    - Jointure sur la clé adresse_norm
+    - En cas de doublons DPE sur la même adresse, prendre le DPE le plus récent
+    """
+    logger.info("Jointure DPE (par adresse normalisée)...")
+
+    if "adresse_norm" not in df.columns:
+        logger.warning("⚠ Colonne adresse_norm absente — relancer make data-clean d'abord")
         return df
 
-    dpe_valid = dpe.dropna(subset=[x_col, y_col]).copy()
-    logger.info(f"  DPE avec coordonnées : {len(dpe_valid):,} / {len(dpe):,}")
+    dpe = load_dpe()
 
     dpe_cols_keep = [
-        "etiquette_dpe", "etiquette_ges", "annee_construction",
-        "conso_5_usages_par_m2_ep", "emission_ges_5_usages_par_m2",
+        "adresse_ban",
+        "etiquette_dpe",
+        "etiquette_ges",
+        "annee_construction",
+        "conso_5_usages_par_m2_ep",
+        "emission_ges_5_usages_par_m2",
+        "date_etablissement_dpe",
     ]
-    dpe_cols_available = [c for c in dpe_cols_keep if c in dpe_valid.columns]
+    dpe_cols_available = [c for c in dpe_cols_keep if c in dpe.columns]
+    dpe = dpe[dpe_cols_available].copy()
 
-    gdf_dpe = gpd.GeoDataFrame(
-        dpe_valid[dpe_cols_available],
-        geometry=gpd.points_from_xy(dpe_valid[x_col], dpe_valid[y_col]),
-        crs=EPSG_LAMBERT,
-    ).reset_index(drop=True)
+    # Normaliser adresses DPE
+    dpe["adresse_norm"] = normalize_adresse_ban(dpe["adresse_ban"])
 
-    # Conserver l'index DVF original pour la déduplication
-    df = df.reset_index(drop=True).copy()
-    df["_dvf_idx"] = df.index
+    # Garder le DPE le plus récent par adresse
+    if "date_etablissement_dpe" in dpe.columns:
+        dpe = (
+            dpe.sort_values("date_etablissement_dpe", ascending=False)
+            .drop_duplicates(subset="adresse_norm", keep="first")
+        )
+    else:
+        dpe = dpe.drop_duplicates(subset="adresse_norm", keep="first")
 
-    gdf_dvf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
-        crs=EPSG_WGS84,
-    ).to_crs(EPSG_LAMBERT)
+    dpe = dpe.drop(columns=["adresse_ban", "date_etablissement_dpe"], errors="ignore")
 
-    joined = gpd.sjoin_nearest(
-        gdf_dvf,
-        gdf_dpe,
-        how="left",
-        max_distance=DPE_SEUIL_M,
-        distance_col="_dpe_dist_m",
-    )
+    # Log quelques exemples pour diagnostic
+    logger.info(f"  Exemple clés DPE  : {dpe['adresse_norm'].head(5).tolist()}")
+    logger.info(f"  Exemple clés DVF  : {df['adresse_norm'].head(5).tolist()}")
 
-    # En cas de doublons (plusieurs DPE à égalité), garder le plus proche
-    joined = (
-        joined
-        .sort_values("_dpe_dist_m")
-        .drop_duplicates(subset="_dvf_idx", keep="first")
-        .set_index("_dvf_idx")
-        .sort_index()
-    )
+    merged = df.merge(dpe, on="adresse_norm", how="left")
 
-    result = df.drop(columns=["_dvf_idx"]).copy()
-    for col in dpe_cols_available:
-        result[col] = joined[col].values
-
-    n_matched = result["etiquette_dpe"].notna().sum() if "etiquette_dpe" in result.columns else 0
+    n_matched = merged["etiquette_dpe"].notna().sum() if "etiquette_dpe" in merged.columns else 0
     logger.info(f"✓ DPE jointé : {n_matched:,} / {len(df):,} ({n_matched / len(df):.1%})")
-    return result
+    return merged
 
 
 def join_equipements_osm(df: pd.DataFrame) -> pd.DataFrame:
