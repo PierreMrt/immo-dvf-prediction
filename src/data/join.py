@@ -37,7 +37,6 @@ def join_iris(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["code_iris"] = joined["CODE_IRIS"].values
     df["nom_iris"] = joined["NOM_IRIS"].values
-
     logger.info(f"✓ IRIS assigné ({df['code_iris'].notna().sum():,} / {len(df):,})")
     return df
 
@@ -45,7 +44,13 @@ def join_iris(df: pd.DataFrame) -> pd.DataFrame:
 def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Joindre les données DPE au dataset DVF par adresse normalisée.
-    La jointure DPE est approximative (adresses textuelles).
+
+    Colonnes apportées depuis dpe03existant :
+      - etiquette_dpe   : classe énergie (A-G)
+      - etiquette_ges   : classe GES (A-G)
+      - annee_construction
+      - conso_5_usages_par_m2_ep
+      - emission_ges_5_usages_par_m2
     """
     logger.info("Jointure DPE...")
     dpe = load_dpe()
@@ -66,18 +71,22 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
 
     dpe_cols = [
         "adresse_norm",
-        "classe_energie",
+        "etiquette_dpe",
+        "etiquette_ges",
         "annee_construction",
-        "consommation_energie_primaire",
-        "emission_ges_energie_primaire",
+        "conso_5_usages_par_m2_ep",
+        "emission_ges_5_usages_par_m2",
     ]
+    # Ne garder que les colonnes disponibles dans le fichier téléchargé
+    dpe_cols_available = [c for c in dpe_cols if c in dpe.columns]
+
     merged = df.merge(
-        dpe[dpe_cols].drop_duplicates("adresse_norm"),
+        dpe[dpe_cols_available].drop_duplicates("adresse_norm"),
         on="adresse_norm",
         how="left",
     )
 
-    n_matched = merged["classe_energie"].notna().sum()
+    n_matched = merged["etiquette_dpe"].notna().sum() if "etiquette_dpe" in merged.columns else 0
     logger.info(f"✓ DPE jointé : {n_matched:,} / {len(df):,} ({n_matched / len(df):.1%})")
     return merged.drop(columns=["adresse_norm"])
 
@@ -85,21 +94,22 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
 def join_bpe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compter les équipements BPE dans un rayon de 500m autour de chaque vente.
-    Utilise les coordonnées Lambert-93 de la BPE.
+    Utilise les coordonnées Lambert-93 de la BPE (colonnes LAMBERT_X / LAMBERT_Y).
     """
     logger.info(f"Jointure BPE (rayon {RAYON_EQUIPEMENTS_M}m)...")
     bpe = load_bpe()
 
-    coord_cols = {"lambert_x": ["LAMBERT_X", "X"], "lambert_y": ["LAMBERT_Y", "Y"]}
-    col_map: dict[str, str] = {}
-    for target, candidates in coord_cols.items():
-        for c in candidates:
-            if c in bpe.columns:
-                col_map[target] = c
-                break
+    # Détection flexible des colonnes de coordonnées Lambert
+    x_col = next((c for c in ["LAMBERT_X", "lambert_x", "X"] if c in bpe.columns), None)
+    y_col = next((c for c in ["LAMBERT_Y", "lambert_y", "Y"] if c in bpe.columns), None)
 
-    if len(col_map) < 2:
+    if not x_col or not y_col:
         logger.warning("Colonnes Lambert introuvables dans BPE, jointure ignorée")
+        return df
+
+    typequ_col = next((c for c in ["TYPEQU", "typequ"] if c in bpe.columns), None)
+    if not typequ_col:
+        logger.warning("Colonne TYPEQU introuvable dans BPE, jointure ignorée")
         return df
 
     gdf_dvf = gpd.GeoDataFrame(
@@ -108,10 +118,9 @@ def join_bpe(df: pd.DataFrame) -> pd.DataFrame:
         crs=EPSG_WGS84,
     ).to_crs(EPSG_LAMBERT)
 
-    typequ_col = "TYPEQU" if "TYPEQU" in bpe.columns else "typequ"
     gdf_bpe = gpd.GeoDataFrame(
         bpe,
-        geometry=gpd.points_from_xy(bpe[col_map["lambert_x"]], bpe[col_map["lambert_y"]]),
+        geometry=gpd.points_from_xy(bpe[x_col], bpe[y_col]),
         crs=EPSG_LAMBERT,
     )
 
@@ -135,15 +144,7 @@ def join_bpe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_all_joins(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Exécuter toutes les jointures dans l'ordre.
-
-    Args:
-        df: DataFrame DVF nettoyé
-
-    Returns:
-        DataFrame enrichi avec DPE, BPE, IRIS
-    """
+    """Exécuter toutes les jointures dans l'ordre."""
     df = join_iris(df)
     df = join_dpe(df)
     df = join_bpe(df)

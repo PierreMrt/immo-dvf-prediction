@@ -25,19 +25,25 @@ BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_x
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
 
-# Colonnes disponibles dans le dataset dpe03existant (juillet 2021+)
+# Colonnes à récupérer depuis le dataset dpe03existant
+# Référence schema : curl https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines?size=1
 DPE_SELECT_COLS = ",".join([
     "numero_dpe",
     "date_etablissement_dpe",
     "adresse_ban",
     "code_postal_ban",
     "nom_commune_ban",
-    "etiquette_dpe",           # classe énergie (A–G) dans dpe03existant
+    "etiquette_dpe",                       # classe énergie (A-G)
     "etiquette_ges",
     "annee_construction",
-    "surface_habitable_logement",
+    "surface_habitable_immeuble",           # surface disponible dans dpe03existant
     "consommation_energie_primaire",
-    "emission_ges_energie_primaire",
+    "emission_ges_5_usages_par_m2",         # émissions GES par m²
+    "conso_5_usages_par_m2_ep",            # conso énergie primaire par m²
+    "coordonnee_cartographique_x_ban",     # Lambert-93 X
+    "coordonnee_cartographique_y_ban",     # Lambert-93 Y
+    "periode_construction",
+    "type_batiment",
 ])
 
 
@@ -101,7 +107,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
     """
     Télécharger les DPE (depuis juillet 2021) via l'API ADEME par pagination.
     Filtre sur le code postal pour ne garder qu'Angers et environs.
-    Dataset : dpe03existant (remplace dpe-v2-logements-existants depuis 2025)
+    Dataset : dpe03existant
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -130,8 +136,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
             r.raise_for_status()
             data = r.json()
         except requests.HTTPError as e:
-            logger.error(f"✗ Erreur DPE page {page} ({e.response.status_code}) : {e}")
-            logger.error(f"  URL : {r.url}")
+            logger.error(f"✗ Erreur DPE page {page} ({e.response.status_code if e.response else '?'}) : {e}")
             break
         except requests.RequestException as e:
             logger.error(f"✗ Erreur DPE page {page} : {e}")
@@ -150,9 +155,6 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
     if dfs:
         df = pd.concat(dfs, ignore_index=True)
-        # Normaliser le nom de la colonne classe énergie
-        if "etiquette_dpe" in df.columns and "classe_energie" not in df.columns:
-            df = df.rename(columns={"etiquette_dpe": "classe_energie"})
         df.to_parquet(dest, index=False)
         logger.info(f"✓ DPE téléchargé : {len(df):,} lignes → {dest.name}")
     else:
