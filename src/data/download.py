@@ -5,7 +5,7 @@ Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
-- Équipements OSM : Overpass API kumi.systems
+- Équipements OSM : Overpass API kumi.systems (requêtes par catégorie)
 """
 
 import gzip
@@ -23,8 +23,9 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# Bounding box département Maine-et-Loire (49) : (lat_min, lon_min, lat_max, lon_max)
-BBOX_49 = (47.10, -1.00, 47.90, -0.10)
+# Bbox restreinte à Angers et communes limitrophes (~20km autour)
+# Plus rapide qu'une bbox départementale, couvre la zone d'intérêt du projet
+BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
 
 # Colonnes à conserver depuis dpe03existant (noms confirmés via API)
 DPE_COLS_TO_KEEP = [
@@ -45,6 +46,14 @@ DPE_COLS_TO_KEEP = [
     "type_batiment",
 ]
 
+# Catégories OSM : chaque entrée est (categorie_sortie, filtres_overpass)
+OSM_CATEGORIES: list[tuple[str, list[str]]] = [
+    ("commerce",    ['node["shop"]']),
+    ("restaurant",  ['node["amenity"="restaurant"]', 'node["amenity"="fast_food"]']),
+    ("ecole",       ['node["amenity"="school"]', 'node["amenity"="kindergarten"]']),
+    ("parc",        ['node["leisure"="park"]', 'node["leisure"="garden"]']),
+]
+
 
 def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
     """Télécharger un fichier en streaming vers dest."""
@@ -54,6 +63,18 @@ def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=65_536):
                 f.write(chunk)
+
+
+def _overpass_query(filters: list[str], bbox_str: str, timeout: int = 60) -> list[dict]:
+    """
+    Exécuter une requête Overpass pour une liste de filtres sur une bbox.
+    Retourne la liste des éléments OSM.
+    """
+    lines = "\n".join(f"  {f}({bbox_str});" for f in filters)
+    query = f"[out:json][timeout:{timeout}];\n(\n{lines}\n);\nout center;"
+    r = requests.get(OVERPASS_URL, params={"data": query}, timeout=timeout + 10)
+    r.raise_for_status()
+    return r.json().get("elements", [])
 
 
 def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
@@ -112,7 +133,6 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"Téléchargement DPE ADEME (code postal {code_postal_prefix}*)...")
 
-    # URL initiale avec filtre
     next_url: str | None = (
         f"{DPE_API_URL}?size={DPE_BATCH_SIZE}&code_postal_ban_starts={code_postal_prefix}"
     )
@@ -142,7 +162,6 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
         dfs.append(df_page[cols])
         logger.info(f"  Page {page} : {len(results)} enregistrements")
 
-        # next est une URL complète prête à appeler
         next_url = data.get("next")
         page += 1
 
@@ -157,10 +176,10 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 def download_equipements_osm(bbox: tuple[float, float, float, float] | None = None) -> None:
     """
     Télécharger les équipements urbains via Overpass API (instance kumi.systems).
-    Remplace la BPE INSEE.
+    Une requête par catégorie pour éviter les timeouts.
 
     Args:
-        bbox: (lat_min, lon_min, lat_max, lon_max) — défaut : Maine-et-Loire
+        bbox: (lat_min, lon_min, lat_max, lon_max) — défaut : zone Angers
     """
     dest = DATA_RAW_DIR / "osm" / "equipements_osm.parquet"
     if dest.exists():
@@ -168,59 +187,38 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    bbox = bbox or BBOX_49
+    bbox = bbox or BBOX_ANGERS
     bbox_str = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
-
-    filters = [
-        f'node["shop"]({bbox_str})',
-        f'node["amenity"="restaurant"]({bbox_str})',
-        f'node["amenity"="fast_food"]({bbox_str})',
-        f'node["amenity"="school"]({bbox_str})',
-        f'node["amenity"="kindergarten"]({bbox_str})',
-        f'node["leisure"="park"]({bbox_str})',
-        f'node["leisure"="garden"]({bbox_str})',
-    ]
-    query = "[out:json][timeout:120];\n(\n" + "\n".join(f"  {f};" for f in filters) + "\n);\nout center;"
-
     logger.info(f"Téléchargement équipements OSM (bbox {bbox_str})...")
-    try:
-        r = requests.get(OVERPASS_URL, params={"data": query}, timeout=120)
-        r.raise_for_status()
-        elements = r.json().get("elements", [])
-    except requests.RequestException as e:
-        logger.error(f"✗ Erreur Overpass : {e}")
-        return
 
-    if not elements:
+    all_rows: list[dict] = []
+
+    for categorie, filters in OSM_CATEGORIES:
+        logger.info(f"  Requête OSM : {categorie}...")
+        try:
+            elements = _overpass_query(filters, bbox_str)
+        except requests.RequestException as e:
+            logger.error(f"✗ Erreur Overpass ({categorie}) : {e}")
+            continue
+
+        for el in elements:
+            tags = el.get("tags", {})
+            all_rows.append({
+                "osm_id": el["id"],
+                "lat": el.get("lat") or el.get("center", {}).get("lat"),
+                "lon": el.get("lon") or el.get("center", {}).get("lon"),
+                "categorie": categorie,
+                "nom": tags.get("name", ""),
+            })
+        logger.info(f"    ✓ {len(elements)} éléments")
+
+    if not all_rows:
         logger.warning("⚠ Aucun équipement OSM récupéré")
         return
 
-    rows = []
-    for el in elements:
-        tags = el.get("tags", {})
-        if "shop" in tags:
-            categorie = "commerce"
-        elif tags.get("amenity") in ("restaurant", "fast_food"):
-            categorie = "restaurant"
-        elif tags.get("amenity") in ("school", "kindergarten"):
-            categorie = "ecole"
-        elif tags.get("leisure") in ("park", "garden"):
-            categorie = "parc"
-        else:
-            continue
-        rows.append({
-            "osm_id": el["id"],
-            "lat": el.get("lat") or el.get("center", {}).get("lat"),
-            "lon": el.get("lon") or el.get("center", {}).get("lon"),
-            "categorie": categorie,
-            "nom": tags.get("name", ""),
-        })
-
-    df = pd.DataFrame(rows).dropna(subset=["lat", "lon"])
+    df = pd.DataFrame(all_rows).dropna(subset=["lat", "lon"])
     df.to_parquet(dest, index=False)
     logger.info(f"✓ Équipements OSM téléchargés : {len(df):,} éléments → {dest.name}")
-    for cat in ["commerce", "restaurant", "ecole", "parc"]:
-        logger.info(f"   {cat} : {(df['categorie'] == cat).sum():,}")
 
 
 def download_all() -> None:
