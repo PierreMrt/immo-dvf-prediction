@@ -5,11 +5,12 @@ Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
-- Équipements OSM : Overpass API kumi.systems (requêtes par catégorie)
+- Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
 """
 
 import gzip
 import shutil
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -23,8 +24,7 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# Bbox restreinte à Angers et communes limitrophes (~20km autour)
-# Plus rapide qu'une bbox départementale, couvre la zone d'intérêt du projet
+# Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
 
 # Colonnes à conserver depuis dpe03existant (noms confirmés via API)
@@ -46,12 +46,15 @@ DPE_COLS_TO_KEEP = [
     "type_batiment",
 ]
 
-# Catégories OSM : chaque entrée est (categorie_sortie, filtres_overpass)
-OSM_CATEGORIES: list[tuple[str, list[str]]] = [
-    ("commerce",    ['node["shop"]']),
-    ("restaurant",  ['node["amenity"="restaurant"]', 'node["amenity"="fast_food"]']),
-    ("ecole",       ['node["amenity"="school"]', 'node["amenity"="kindergarten"]']),
-    ("parc",        ['node["leisure"="park"]', 'node["leisure"="garden"]']),
+# Une entrée par filtre OSM atomique : (categorie, filtre_overpass)
+OSM_FILTERS: list[tuple[str, str]] = [
+    ("commerce",   'node["shop"]'),
+    ("restaurant", 'node["amenity"="restaurant"]'),
+    ("restaurant", 'node["amenity"="fast_food"]'),
+    ("ecole",      'node["amenity"="school"]'),
+    ("ecole",      'node["amenity"="kindergarten"]'),
+    ("parc",       'node["leisure"="park"]'),
+    ("parc",       'node["leisure"="garden"]'),
 ]
 
 
@@ -65,16 +68,45 @@ def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
                 f.write(chunk)
 
 
-def _overpass_query(filters: list[str], bbox_str: str, timeout: int = 60) -> list[dict]:
+def _overpass_query_with_retry(
+    osm_filter: str,
+    bbox_str: str,
+    overpass_timeout: int = 45,
+    max_retries: int = 3,
+    retry_delay: float = 15.0,
+) -> list[dict]:
     """
-    Exécuter une requête Overpass pour une liste de filtres sur une bbox.
-    Retourne la liste des éléments OSM.
+    Exécuter une requête Overpass pour un filtre unique avec retry exponentiel.
+
+    Args:
+        osm_filter: Filtre Overpass sans bbox, ex : 'node["shop"]'
+        bbox_str: Bbox au format 'lat_min,lon_min,lat_max,lon_max'
+        overpass_timeout: Timeout Overpass QL (dans la requête)
+        max_retries: Nombre de tentatives
+        retry_delay: Délai initial entre tentatives (doublé à chaque échec)
     """
-    lines = "\n".join(f"  {f}({bbox_str});" for f in filters)
-    query = f"[out:json][timeout:{timeout}];\n(\n{lines}\n);\nout center;"
-    r = requests.get(OVERPASS_URL, params={"data": query}, timeout=timeout + 10)
-    r.raise_for_status()
-    return r.json().get("elements", [])
+    query = (
+        f"[out:json][timeout:{overpass_timeout}];\n"
+        f"(\n  {osm_filter}({bbox_str});\n);\n"
+        "out center;"
+    )
+    delay = retry_delay
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get(
+                OVERPASS_URL,
+                params={"data": query},
+                timeout=overpass_timeout + 10,
+            )
+            r.raise_for_status()
+            return r.json().get("elements", [])
+        except (requests.Timeout, requests.HTTPError) as e:
+            if attempt < max_retries:
+                logger.warning(f"    Tentative {attempt}/{max_retries} échouée ({e}), nouvel essai dans {delay:.0f}s...")
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
 
 
 def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
@@ -176,7 +208,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 def download_equipements_osm(bbox: tuple[float, float, float, float] | None = None) -> None:
     """
     Télécharger les équipements urbains via Overpass API (instance kumi.systems).
-    Une requête par catégorie pour éviter les timeouts.
+    Une requête atomique par filtre OSM avec retry exponentiel.
 
     Args:
         bbox: (lat_min, lon_min, lat_max, lon_max) — défaut : zone Angers
@@ -193,12 +225,12 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
 
     all_rows: list[dict] = []
 
-    for categorie, filters in OSM_CATEGORIES:
-        logger.info(f"  Requête OSM : {categorie}...")
+    for categorie, osm_filter in OSM_FILTERS:
+        logger.info(f"  {osm_filter}...")
         try:
-            elements = _overpass_query(filters, bbox_str)
+            elements = _overpass_query_with_retry(osm_filter, bbox_str)
         except requests.RequestException as e:
-            logger.error(f"✗ Erreur Overpass ({categorie}) : {e}")
+            logger.error(f"✗ Erreur Overpass ({osm_filter}) après retries : {e}")
             continue
 
         for el in elements:
@@ -211,6 +243,8 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
                 "nom": tags.get("name", ""),
             })
         logger.info(f"    ✓ {len(elements)} éléments")
+        # Pause courte entre requêtes pour ne pas saturer le serveur
+        time.sleep(2)
 
     if not all_rows:
         logger.warning("⚠ Aucun équipement OSM récupéré")
@@ -219,6 +253,8 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
     df = pd.DataFrame(all_rows).dropna(subset=["lat", "lon"])
     df.to_parquet(dest, index=False)
     logger.info(f"✓ Équipements OSM téléchargés : {len(df):,} éléments → {dest.name}")
+    for cat in ["commerce", "restaurant", "ecole", "parc"]:
+        logger.info(f"   {cat} : {(df['categorie'] == cat).sum():,}")
 
 
 def download_all() -> None:
