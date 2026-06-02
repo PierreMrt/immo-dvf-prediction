@@ -3,12 +3,12 @@ Téléchargement des données DVF, DPE et BPE depuis leurs URLs stables.
 
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
-- DPE (depuis juil. 2021) : API ADEME paginée https://data.ademe.fr/data-fair/api/v1/datasets/dpe-v2-logements-existants/lines
-- BPE 2024 avec coord. : https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip
+  Disponibles avec un décalage : l'année N est publiée courant N+1.
+- DPE (depuis juil. 2021) : API ADEME https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines
+- BPE 2024 avec coord. : https://www.insee.fr/fr/statistiques/fichier/8217537/bpe24_ensemble_xy_csv.zip
 """
 
 import gzip
-import io
 import shutil
 import zipfile
 from pathlib import Path
@@ -21,8 +21,10 @@ from src.utils.logging import logger
 
 # --- URLs stables ---
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz"
-BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217525/bpe24_ensemble_xy_csv.zip"
-DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe-v2-logements-existants/lines"
+# BPE 2024 géolocalisée — URL stable INSEE (page : https://www.insee.fr/fr/statistiques/8217537)
+BPE_URL = "https://www.insee.fr/fr/statistiques/fichier/8217537/bpe24_ensemble_xy_csv.zip"
+# DPE logements existants depuis juillet 2021 (dataset ID mis à jour février 2025)
+DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
 
 
@@ -40,6 +42,9 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
     """
     Télécharger les DVF géolocalisées pour le département configuré.
     Les fichiers .csv.gz sont décompressés automatiquement en .csv.
+
+    Note : les DVF sont publiées avec un décalage d'environ 6 mois.
+    L'année N n'est généralement disponible que courant N+1.
 
     Args:
         years: Années à télécharger (défaut : DVF_YEARS depuis config)
@@ -60,15 +65,26 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
 
         try:
             _download_stream(url, dest_gz)
-            # Décompression gz → csv
-            with gzip.open(dest_gz, "rb") as f_in, open(dest_csv, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
-            dest_gz.unlink()  # Supprimer le .gz après décompression
-            logger.info(f"✓ DVF {year} téléchargé et décompressé : {dest_csv.name}")
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                logger.warning(
+                    f"⚠ DVF {year} non disponible (publiée avec décalage, réessayer plus tard)"
+                )
+            else:
+                logger.error(f"✗ Erreur DVF {year} : {e}")
+            if dest_gz.exists():
+                dest_gz.unlink()
+            continue
         except requests.RequestException as e:
             logger.error(f"✗ Erreur DVF {year} : {e}")
             if dest_gz.exists():
                 dest_gz.unlink()
+            continue
+
+        with gzip.open(dest_gz, "rb") as f_in, open(dest_csv, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        dest_gz.unlink()
+        logger.info(f"✓ DVF {year} téléchargé et décompressé : {dest_csv.name}")
 
 
 def download_dpe(code_postal_prefix: str = "490") -> None:
@@ -77,7 +93,7 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
     Filtre sur le code postal pour ne garder qu'Angers et environs.
 
     Args:
-        code_postal_prefix: Préfixe de code postal à filtrer (défaut : "490" pour Angers)
+        code_postal_prefix: Préfixe de code postal (défaut : "490" pour Angers)
     """
     dest = DATA_RAW_DIR / "dpe" / "dpe_angers.parquet"
     if dest.exists():
@@ -127,7 +143,6 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
         dfs.append(pd.DataFrame(results))
         logger.info(f"  Page {page} : {len(results)} enregistrements")
-
         after = data.get("next")
         if not after:
             break
@@ -145,6 +160,7 @@ def download_bpe() -> None:
     """
     Télécharger la BPE 2024 (avec coordonnées Lambert-93) depuis l'INSEE.
     Filtre sur le département configuré après extraction du ZIP.
+    Page source : https://www.insee.fr/fr/statistiques/8217537
     """
     dest = DATA_RAW_DIR / "bpe" / "bpe_insee.csv"
     if dest.exists():
@@ -161,18 +177,16 @@ def download_bpe() -> None:
         logger.error(f"✗ Erreur BPE : {e}")
         return
 
-    # Extraire le CSV principal du ZIP et filtrer sur le département
     with zipfile.ZipFile(dest_zip, "r") as z:
         csv_files = [f for f in z.namelist() if f.endswith(".csv")]
         if not csv_files:
             logger.error("✗ Aucun CSV trouvé dans le ZIP BPE")
+            dest_zip.unlink()
             return
         with z.open(csv_files[0]) as f:
             df = pd.read_csv(f, sep=";", dtype={"DEPCOM": str, "DEP": str}, low_memory=False)
 
     dest_zip.unlink()
-
-    # Filtrer sur le département configuré
     df_dep = df[df["DEP"] == settings.department_code].reset_index(drop=True)
     df_dep.to_csv(dest, index=False)
     logger.info(f"✓ BPE téléchargé : {len(df_dep):,} équipements (dép. {settings.department_code}) → {dest.name}")
