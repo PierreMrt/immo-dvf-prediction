@@ -5,7 +5,7 @@ Téléchargement des données DVF, DPE, BPE, IRIS, COPRO depuis data.gouv.fr / d
 import requests
 from pathlib import Path
 
-from src.utils.config import DATA_RAW_DIR, settings
+from src.utils.config import DATA_RAW_DIR, DVF_YEARS, settings
 from src.utils.logging import logger
 
 # UUIDs des ressources sur data.gouv.fr (mettre à jour si besoin)
@@ -36,7 +36,7 @@ def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
     Args:
         years: Années à télécharger (défaut : config)
     """
-    years = years or settings.dvf_years
+    years = years or DVF_YEARS
     dvf_dir = DATA_RAW_DIR / "dvf"
 
     for year in years:
@@ -64,7 +64,6 @@ def download_dpe() -> None:
         logger.info(f"DPE déjà présent, saut ({dest})")
         return
 
-    # URL à ajuster selon data.ademe.fr
     url = "https://data.ademe.fr/datasets/dpe-france/files/download"
     logger.info("Téléchargement DPE Ademe...")
     try:
@@ -81,7 +80,6 @@ def download_bpe() -> None:
         logger.info(f"BPE déjà présent, saut ({dest})")
         return
 
-    # https://www.data.gouv.fr/datasets/base-permanente-des-equipements/
     url = f"{DATA_GOUV_BASE}<uuid-bpe-insee>"
     logger.info("Téléchargement BPE INSEE...")
     try:
@@ -98,7 +96,6 @@ def download_iris() -> None:
         logger.info(f"IRIS déjà présent, saut ({dest})")
         return
 
-    # https://www.data.gouv.fr/datasets/historique-des-codes-iris/
     url = f"{DATA_GOUV_BASE}<uuid-iris-insee>"
     logger.info("Téléchargement IRIS INSEE...")
     try:
@@ -115,7 +112,6 @@ def download_copro() -> None:
         logger.info(f"COPRO déjà présent, saut ({dest})")
         return
 
-    # https://www.data.gouv.fr/datasets/6084d4d0b752764f35006465/
     url = f"{DATA_GOUV_BASE}<uuid-copro>"
     logger.info("Téléchargement COPRO...")
     try:

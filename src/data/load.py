@@ -4,7 +4,7 @@ Chargement des fichiers de données brutes et processées.
 
 import pandas as pd
 
-from src.utils.config import DATA_PROCESSED_DIR, DATA_RAW_DIR, settings
+from src.utils.config import DATA_PROCESSED_DIR, DATA_RAW_DIR, DVF_YEARS, settings
 from src.utils.logging import logger
 
 
@@ -18,7 +18,7 @@ def load_dvf_raw(years: list[int] | None = None) -> pd.DataFrame:
     Returns:
         DataFrame concaténé de toutes les années
     """
-    years = years or settings.dvf_years
+    years = years or DVF_YEARS
     dvf_dir = DATA_RAW_DIR / "dvf"
     dfs: list[pd.DataFrame] = []
 
