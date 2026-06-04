@@ -1,11 +1,12 @@
 """
-Téléchargement des données DVF, DPE et équipements OSM depuis leurs URLs stables.
+Téléchargement des données DVF, DPE, équipements OSM et contours IRIS depuis leurs URLs stables.
 
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
+- Contours IRIS : IGN via data.gouv.fr (GeoJSON du département)
 """
 
 import gzip
@@ -23,6 +24,30 @@ DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departemen
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
+
+# URL stable IGN/data.gouv — millésime 2023 (mis à jour chaque année)
+# Format : contours IRIS nationaux filtrés sur le département voulu
+IRIS_BASE_URL = (
+    "https://wxs.ign.fr/1yhlj2ehpqf3q6dt6a2y7b64/telechargement/inspire/"
+    "CONTOURS-IRIS-2023-01-01$CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01/"
+    "file/CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01.7z"
+)
+# Alternative data.gouv directe (GeoJSON simplifié, plus léger)
+IRIS_GEOJSON_URL = (
+    "https://data.geopf.fr/wfs/ows"
+    "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+    "&TYPENAMES=BDTOPO_V3:zone_d_activite_ou_d_interet"
+    "&outputFormat=application/json"
+)
+# URL spécifique contours IRIS 2023 via API Géoplateforme IGN (GeoJSON natif)
+IRIS_API_URL = (
+    "https://data.geopf.fr/wfs/ows"
+    "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+    "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
+    "&outputFormat=application/json"
+    "&CQL_FILTER=insee_dep='{dep}'"
+    "&count=5000"
+)
 
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
@@ -257,11 +282,77 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
         logger.info(f"   {cat} : {(df['categorie'] == cat).sum():,}")
 
 
+def download_iris(dep: str | None = None) -> None:
+    """
+    Télécharger les contours IRIS du département via l'API WFS Géoplateforme IGN.
+    Sauvegarde : data/raw/iris/contours_iris_{dep}.geojson
+
+    L'API retourne un GeoJSON paginé (paramètre `startIndex`).
+    Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
+    """
+    dep = dep or settings.department_code
+    dest = DATA_RAW_DIR / "iris" / f"contours_iris_{dep}.geojson"
+
+    if dest.exists():
+        logger.info(f"Contours IRIS déjà présents, saut ({dest.name})")
+        return
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Téléchargement contours IRIS (département {dep})...")
+
+    base_url = (
+        "https://data.geopf.fr/wfs/ows"
+        "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+        "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
+        "&outputFormat=application/json"
+        f"&CQL_FILTER=insee_dep='{dep}'"
+        "&count=1000"
+    )
+
+    all_features: list[dict] = []
+    start_index = 0
+
+    while True:
+        url = f"{base_url}&startIndex={start_index}"
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+        except requests.RequestException as e:
+            logger.warning(f"⚠ Impossible de télécharger les contours IRIS ({e}), code_iris non assigné")
+            return
+
+        features = data.get("features", [])
+        if not features:
+            break
+
+        all_features.extend(features)
+        start_index += len(features)
+
+        # Arrêt si moins de résultats que le batch (dernière page)
+        if len(features) < 1000:
+            break
+
+    if not all_features:
+        logger.warning(f"⚠ Aucun contour IRIS reçu pour le département {dep}, code_iris non assigné")
+        return
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": all_features,
+    }
+
+    import json
+    dest.write_text(json.dumps(geojson, ensure_ascii=False), encoding="utf-8")
+    logger.info(f"✓ Contours IRIS téléchargés : {len(all_features)} zones → {dest.name}")
+
+
 def download_all() -> None:
     """Télécharger toutes les sources de données."""
     download_dvf_geolocalisees()
     download_dpe()
     download_equipements_osm()
+    download_iris()
 
 
 if __name__ == "__main__":
