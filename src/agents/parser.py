@@ -1,13 +1,12 @@
 """
 Agent LLM pour extraire les caractéristiques structurées d'une annonce.
-Utilise LangChain + OpenAI pour parser le texte brut de l'annonce.
+Utilise le client OpenAI compatible avec OpenRouter pour parser le texte brut.
 """
 
 import json
 from typing import Optional
 
-from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 from src.agents.scraper import fetch_annonce_text
@@ -30,9 +29,7 @@ class AnnonceFeatures(BaseModel):
     charges_copro: Optional[float] = Field(None, description="Charges de copropriété mensuelles en euros")
 
 
-PARSE_PROMPT = PromptTemplate(
-    input_variables=["annonce_text"],
-    template="""
+PARSE_PROMPT = """
 Tu es un expert immobilier. Analyse le texte suivant d'une annonce immobilière
 et extrait les informations structurées demandées.
 
@@ -52,18 +49,19 @@ Réponds UNIQUEMENT avec un JSON valide contenant les champs suivants
     "adresse": <str|null>,
     "charges_copro": <float|null>
 }}
-""",
-)
+"""
 
 
 class AnnonceParser:
     """Agent LLM pour parser les annonces immobilières."""
 
     def __init__(self) -> None:
-        if not settings.openai_api_key:
-            raise ValueError("OPENAI_API_KEY manquante dans .env")
-        self._llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=settings.openai_api_key)
-        self._chain = PARSE_PROMPT | self._llm
+        if not settings.openrouter_api_key:
+            raise ValueError("OPENROUTER_API_KEY manquante dans .env")
+        self._client = OpenAI(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.llm_base_url,
+        )
 
     def parse_url(self, url: str) -> AnnonceFeatures:
         """
@@ -80,14 +78,20 @@ class AnnonceParser:
             logger.warning("Texte vide, retour de features nulles")
             return AnnonceFeatures()
 
-        # Tronquer le texte si trop long (4000 tokens max)
+        # Tronquer le texte si trop long
         text_truncated = text[:8000]
 
         logger.info("Extraction des caractéristiques via LLM...")
-        response = self._chain.invoke({"annonce_text": text_truncated})
+        response = self._client.chat.completions.create(
+            model=settings.llm_model,
+            temperature=0,
+            messages=[
+                {"role": "user", "content": PARSE_PROMPT.format(annonce_text=text_truncated)},
+            ],
+        )
 
         try:
-            data = json.loads(response.content)
+            data = json.loads(response.choices[0].message.content)
             features = AnnonceFeatures(**data)
             logger.info(f"✓ Caractéristiques extraites : {features}")
             return features
