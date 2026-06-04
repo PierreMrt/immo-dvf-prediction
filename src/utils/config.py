@@ -41,7 +41,11 @@ class Settings(BaseSettings):
     log_file: Path = Field(Path("logs/app.log"))
 
     # API Keys
-    openai_api_key: Optional[str] = Field(None)
+    openrouter_api_key: Optional[str] = Field(None)
+
+    # LLM
+    llm_model: str = Field("mistralai/mistral-7b-instruct")
+    llm_base_url: str = Field("https://openrouter.ai/api/v1")
 
     model_config = {
         "env_file": ".env",
