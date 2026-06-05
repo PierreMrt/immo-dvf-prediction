@@ -7,9 +7,9 @@ Sources :
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
-- Contours IRIS : IGN via WFS administratif (ADMINEXPRESS-COG-CARTO.LATEST:iris_ge)
-- Arrêts tram/gare : data.angers.fr (GTFS stops tram) + OSM (gare SNCF)
-- Zones inondables PPRI : Géorisques API (georisques.gouv.fr)
+- Contours IRIS : IGN via WFS data.geopf.fr (STATISTICALUNITS.IRISGE:iris_ge)
+- Arrêts tram/gare : data.angers.fr (GTFS stops Irigo) + OSM (gare SNCF)
+- Zones inondables PPRI : Géorisques API /api/v1/azi par commune
 """
 
 import gzip
@@ -29,18 +29,19 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# Contours IRIS via WFS IGN administratif (endpoint dédié, distinct de data.geopf.fr/wfs)
+# Contours IRIS via WFS data.geopf.fr (endpoint public, sans clé)
+# Typename : STATISTICALUNITS.IRISGE:iris_ge — champ filtre : code_insee (préfixe dép)
 IRIS_WFS_URL = (
-    "https://wxs.ign.fr/administratif/geoportail/wfs"
+    "https://data.geopf.fr/wfs/ows"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-    "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
+    "&TYPENAMES=STATISTICALUNITS.IRISGE:iris_ge"
     "&outputFormat=application/json"
-    "&CQL_FILTER=insee_dep='{dep}'"
+    "&CQL_FILTER=code_insee+LIKE+'{dep}%25'"
     "&count=1000"
 )
 
-# Arrêts tram Angers via data.angers.fr
-# Dataset : horaires-theoriques-et-arrets-du-reseau-irigo-gtfs (fichier stops GTFS)
+# Arrêts tram Angers via data.angers.fr (dataset GTFS stops Irigo)
+# Tous les stops sont renvoyés — le dataset ne contient pas route_type
 TRAM_DATASET_ID = "horaires-theoriques-et-arrets-du-reseau-irigo-gtfs"
 
 # Gare Saint-Serge via Overpass (nœud OSM fixe)
@@ -50,8 +51,34 @@ GARE_OVERPASS_QUERY = (
     "out;"
 )
 
-# PPRI Maine-et-Loire — zones inondables via API Géorisques (BRGM)
-PPRI_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
+# PPRI Maine-et-Loire — zones inondables via API Géorisques /api/v1/azi
+# Requête par codeInsee commune ; communes Angers Loire Métropole (dep 49)
+PPRI_AZI_URL = "https://www.georisques.gouv.fr/api/v1/azi"
+
+# Communes Angers Loire Métropole (code INSEE — dep 49)
+ALM_COMMUNES_INSEE = [
+    "49007",  # Angers
+    "49009",  # Les Ponts-de-Cé
+    "49020",  # Beaucouzé
+    "49023",  # Béhuard
+    "49032",  # Brain-sur-l'Authion
+    "49050",  # Cantenay-Épinard
+    "49062",  # Murs-Érigné (ex-Corzé partiel)
+    "49099",  # Écouflant
+    "49119",  # Feneu
+    "49125",  # Saint-Jean-de-Linières
+    "49145",  # Loire-Authion
+    "49172",  # Longuenée-en-Anjou
+    "49220",  # Pellouailles-les-Vignes
+    "49228",  # Le Plessis-Grammoire
+    "49244",  # Sainte-Gemmes-sur-Loire
+    "49260",  # Saint-Barthélemy-d'Anjou
+    "49277",  # Saint-Clément-de-la-Place
+    "49307",  # Sarrigné
+    "49323",  # Soulaines-sur-Aubance
+    "49355",  # Trélazé
+    "49373",  # Verrières-en-Anjou
+]
 
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
@@ -285,11 +312,12 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
 
 def download_iris(dep: str | None = None) -> None:
     """
-    Télécharger les contours IRIS du département via le WFS IGN administratif.
+    Télécharger les contours IRIS du département via le WFS data.geopf.fr.
     Sauvegarde : data/raw/iris/contours_iris_{dep}.geojson
 
-    Typename WFS : ADMINEXPRESS-COG-CARTO.LATEST:iris_ge
-    Endpoint : wxs.ign.fr/administratif (distinct de data.geopf.fr/wfs/ows)
+    Typename WFS : STATISTICALUNITS.IRISGE:iris_ge
+    Endpoint : data.geopf.fr/wfs/ows (public, sans clé API)
+    Filtre : code_insee LIKE '{dep}%' (les IRIS d'un département ont code_insee commençant par le code dep)
     L'API retourne un GeoJSON paginé (paramètre startIndex).
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
@@ -345,8 +373,7 @@ def download_arrets_transport() -> None:
     Télécharger les arrêts tram depuis data.angers.fr et la gare SNCF via Overpass.
     Sauvegarde : data/raw/transport/arrets_transport.parquet
 
-    - Tram : dataset GTFS stops Irigo (horaires-theoriques-et-arrets-du-reseau-irigo-gtfs)
-             filtre route_type="0" (valeur string dans l'API Angers v2)
+    - Tram : dataset GTFS stops Irigo (tous les stops, sans filtre route_type absent du dataset)
     - Gare : nœud OSM railway=station dans la bbox Angers
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
@@ -366,7 +393,7 @@ def download_arrets_transport() -> None:
         try:
             r = requests.get(
                 f"https://data.angers.fr/api/explore/v2.1/catalog/datasets/{TRAM_DATASET_ID}/records",
-                params={"limit": limit, "offset": offset, "where": 'route_type="0"'},
+                params={"limit": limit, "offset": offset},
                 timeout=30,
             )
             r.raise_for_status()
@@ -431,54 +458,45 @@ def download_arrets_transport() -> None:
 
 def download_ppri() -> None:
     """
-    Télécharger les zones inondables PPRI du Maine-et-Loire via l'API Géorisques (BRGM).
-    Sauvegarde : data/raw/ppri/zones_inondables_49.geojson
+    Télécharger les zones inondables PPRI via l'API Géorisques /api/v1/azi.
+    Sauvegarde : data/raw/ppri/zones_inondables_49.json
 
-    Utilise l'endpoint /api/v1/gaspar/azi filtré sur code_departement=49.
+    L'endpoint /gaspar/azi ne retourne que des métadonnées sans géométries.
+    On utilise /api/v1/azi?codeInsee={code} qui indique si la commune est
+    couverte par un AZI (Atlas des Zones Inondables) — donnée booléenne par commune.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
-    dest = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
+    dest = DATA_RAW_DIR / "ppri" / "zones_inondables_49.json"
     if dest.exists():
         logger.info(f"PPRI déjà présent, saut ({dest.name})")
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Téléchargement zones inondables PPRI (département 49)...")
+    logger.info("Téléchargement zones inondables PPRI (communes ALM)...")
 
-    all_features: list[dict] = []
-    page = 1
-    page_size = 1000
+    results: list[dict] = []
+    errors = 0
 
-    while True:
+    for code_insee in ALM_COMMUNES_INSEE:
         try:
             r = requests.get(
-                PPRI_URL,
-                params={"code_departement": "49", "page": page, "page_size": page_size},
-                timeout=60,
+                PPRI_AZI_URL,
+                params={"codeInsee": code_insee},
+                timeout=30,
             )
             r.raise_for_status()
             data = r.json()
+            results.append({"code_insee": code_insee, "azi": data})
         except requests.RequestException as e:
-            logger.warning(f"⚠ Impossible de télécharger le PPRI ({e}), zone_inondable non assignée")
-            return
+            logger.warning(f"  ⚠ Erreur PPRI commune {code_insee} : {e}")
+            errors += 1
 
-        features = data.get("data", [])
-        if not features:
-            break
-
-        all_features.extend(features)
-        page += 1
-
-        if len(features) < page_size:
-            break
-
-    if not all_features:
-        logger.warning("⚠ Aucune zone PPRI reçue, zone_inondable non assignée")
+    if not results:
+        logger.warning("⚠ Impossible de télécharger le PPRI, zone_inondable non assignée")
         return
 
-    geojson = {"type": "FeatureCollection", "features": all_features}
-    dest.write_text(json.dumps(geojson, ensure_ascii=False), encoding="utf-8")
-    logger.info(f"✓ PPRI téléchargé : {len(all_features)} zones → {dest.name}")
+    dest.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+    logger.info(f"✓ PPRI téléchargé : {len(results)} communes → {dest.name}" + (f" ({errors} erreurs)" if errors else ""))
 
 
 def download_all() -> None:
