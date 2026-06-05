@@ -7,9 +7,9 @@ Sources :
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
-- Contours IRIS : IGN via Géoplateforme WFS (ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge)
+- Contours IRIS : IGN via WFS administratif (ADMINEXPRESS-COG-CARTO.LATEST:iris_ge)
 - Arrêts tram/gare : data.angers.fr (GTFS stops tram) + OSM (gare SNCF)
-- Zones inondables PPRI : data.gouv.fr (GeoJSON Maine-et-Loire)
+- Zones inondables PPRI : Géorisques API (georisques.gouv.fr)
 """
 
 import gzip
@@ -29,12 +29,11 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# Contours IRIS via Géoplateforme IGN WFS
-# Typename correct : ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge
-IRIS_API_URL = (
-    "https://data.geopf.fr/wfs/ows"
+# Contours IRIS via WFS IGN administratif (endpoint dédié, distinct de data.geopf.fr/wfs)
+IRIS_WFS_URL = (
+    "https://wxs.ign.fr/administratif/geoportail/wfs"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-    "&TYPENAMES=ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge"
+    "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
     "&outputFormat=application/json"
     "&CQL_FILTER=insee_dep='{dep}'"
     "&count=1000"
@@ -50,15 +49,9 @@ GARE_OVERPASS_QUERY = (
     "node[\"railway\"=\"station\"](47.40,-0.65,47.55,-0.45);\n"
     "out;"
 )
-# PPRI Maine-et-Loire — zones inondables data.gouv.fr
-PPRI_URL = (
-    "https://data.geopf.fr/wfs/ows"
-    "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-    "&TYPENAMES=BDTOPO_V3:zone_de_risque_naturel"
-    "&outputFormat=application/json"
-    "&CQL_FILTER=code_departement='49'"
-    "&count=2000"
-)
+
+# PPRI Maine-et-Loire — zones inondables via API Géorisques (BRGM)
+PPRI_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
 
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
@@ -292,10 +285,11 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
 
 def download_iris(dep: str | None = None) -> None:
     """
-    Télécharger les contours IRIS du département via l'API WFS Géoplateforme IGN.
+    Télécharger les contours IRIS du département via le WFS IGN administratif.
     Sauvegarde : data/raw/iris/contours_iris_{dep}.geojson
 
-    Typename WFS : ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge
+    Typename WFS : ADMINEXPRESS-COG-CARTO.LATEST:iris_ge
+    Endpoint : wxs.ign.fr/administratif (distinct de data.geopf.fr/wfs/ows)
     L'API retourne un GeoJSON paginé (paramètre startIndex).
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
@@ -309,15 +303,7 @@ def download_iris(dep: str | None = None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info(f"Téléchargement contours IRIS (département {dep})...")
 
-    base_url = (
-        "https://data.geopf.fr/wfs/ows"
-        "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-        "&TYPENAMES=ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge"
-        "&outputFormat=application/json"
-        f"&CQL_FILTER=insee_dep='{dep}'"
-        "&count=1000"
-    )
-
+    base_url = IRIS_WFS_URL.format(dep=dep)
     all_features: list[dict] = []
     start_index = 0
 
@@ -360,8 +346,7 @@ def download_arrets_transport() -> None:
     Sauvegarde : data/raw/transport/arrets_transport.parquet
 
     - Tram : dataset GTFS stops Irigo (horaires-theoriques-et-arrets-du-reseau-irigo-gtfs)
-             filtre sur stop_name contenant des noms de lignes tram (A/B/C)
-             ou sur le champ route_type=0 (tram) si disponible dans le dataset
+             filtre route_type="0" (valeur string dans l'API Angers v2)
     - Gare : nœud OSM railway=station dans la bbox Angers
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
@@ -381,7 +366,7 @@ def download_arrets_transport() -> None:
         try:
             r = requests.get(
                 f"https://data.angers.fr/api/explore/v2.1/catalog/datasets/{TRAM_DATASET_ID}/records",
-                params={"limit": limit, "offset": offset, "where": "route_type=0"},
+                params={"limit": limit, "offset": offset, "where": 'route_type="0"'},
                 timeout=30,
             )
             r.raise_for_status()
@@ -446,10 +431,10 @@ def download_arrets_transport() -> None:
 
 def download_ppri() -> None:
     """
-    Télécharger les zones inondables PPRI du Maine-et-Loire via la Géoplateforme IGN.
+    Télécharger les zones inondables PPRI du Maine-et-Loire via l'API Géorisques (BRGM).
     Sauvegarde : data/raw/ppri/zones_inondables_49.geojson
 
-    Utilise le WFS BDTOPO zone_de_risque_naturel filtré sur le département 49.
+    Utilise l'endpoint /api/v1/gaspar/azi filtré sur code_departement=49.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
     dest = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
@@ -461,26 +446,30 @@ def download_ppri() -> None:
     logger.info("Téléchargement zones inondables PPRI (département 49)...")
 
     all_features: list[dict] = []
-    start_index = 0
+    page = 1
+    page_size = 1000
 
     while True:
-        url = f"{PPRI_URL}&startIndex={start_index}"
         try:
-            r = requests.get(url, timeout=60)
+            r = requests.get(
+                PPRI_URL,
+                params={"code_departement": "49", "page": page, "page_size": page_size},
+                timeout=60,
+            )
             r.raise_for_status()
             data = r.json()
         except requests.RequestException as e:
             logger.warning(f"⚠ Impossible de télécharger le PPRI ({e}), zone_inondable non assignée")
             return
 
-        features = data.get("features", [])
+        features = data.get("data", [])
         if not features:
             break
 
         all_features.extend(features)
-        start_index += len(features)
+        page += 1
 
-        if len(features) < 2000:
+        if len(features) < page_size:
             break
 
     if not all_features:
