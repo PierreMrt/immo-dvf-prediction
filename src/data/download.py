@@ -10,6 +10,8 @@ Sources :
 - Contours IRIS : IGN via WFS data.geopf.fr (STATISTICALUNITS.IRISGE:iris_ge)
 - Arrêts tram/gare : data.angers.fr (GTFS stops Irigo) + OSM (gare SNCF)
 - Zones inondables PPRI : Géorisques /api/v1/gaspar/azi (rayon + latlon, max ~20 km)
+  L'API retourne des métadonnées par commune (code_insee), sans géométrie.
+  La jointure dans join.py se fait par code_insee.
 """
 
 import gzip
@@ -30,7 +32,6 @@ DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
 # Contours IRIS via WFS data.geopf.fr (endpoint public, sans clé)
-# Typename : STATISTICALUNITS.IRISGE:iris_ge — champ filtre : code_insee (préfixe dép)
 IRIS_WFS_URL = (
     "https://data.geopf.fr/wfs/ows"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
@@ -41,18 +42,19 @@ IRIS_WFS_URL = (
 )
 
 # Arrêts tram Angers via data.angers.fr (dataset GTFS stops Irigo)
-# Tous les stops sont renvoyés — le dataset ne contient pas route_type
 TRAM_DATASET_ID = "horaires-theoriques-et-arrets-du-reseau-irigo-gtfs"
 
-# Gare Saint-Serge via Overpass (nœud OSM fixe)
+# Gare SNCF via Overpass — bbox élargie pour couvrir Angers Saint-Laud (lon ~-0.5526)
+# Format Overpass : lat_min,lon_min,lat_max,lon_max
 GARE_OVERPASS_QUERY = (
     "[out:json][timeout:30];\n"
-    "node[\"railway\"=\"station\"](47.40,-0.65,47.55,-0.45);\n"
-    "out;"
+    "node[\"railway\"=\"station\"](47.40,-0.65,47.55,-0.50);\n"
+    "out;\n"
 )
 
 # PPRI — Atlas des Zones Inondables via Géorisques /api/v1/gaspar/azi
-# Paramètres : rayon (mètres, max ~20 000) + latlon (lon,lat) — centre Angers
+# Retourne des métadonnées par commune (code_insee), sans géométrie polygonale.
+# La jointure se fait donc par code_insee dans join.py (pas de sjoin spatial).
 PPRI_GASPAR_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
 PPRI_CENTER_LATLON = "-0.556,47.478"  # lon,lat centre Angers
 PPRI_RAYON = 20_000  # 20 km (limite empirique de l'API)
@@ -294,7 +296,7 @@ def download_iris(dep: str | None = None) -> None:
 
     Typename WFS : STATISTICALUNITS.IRISGE:iris_ge
     Endpoint : data.geopf.fr/wfs/ows (public, sans clé API)
-    Filtre : code_insee LIKE '{dep}%' (les IRIS d'un département ont code_insee commençant par le code dep)
+    Filtre : code_insee LIKE '{dep}%'
     L'API retourne un GeoJSON paginé (paramètre startIndex).
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
@@ -351,7 +353,7 @@ def download_arrets_transport() -> None:
     Sauvegarde : data/raw/transport/arrets_transport.parquet
 
     - Tram : dataset GTFS stops Irigo (tous les stops, sans filtre route_type absent du dataset)
-    - Gare : nœud OSM railway=station dans la bbox Angers
+    - Gare : nœud OSM railway=station dans la bbox élargie couvrant Saint-Laud (lon ~-0.5526)
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
     if dest.exists():
@@ -438,8 +440,8 @@ def download_ppri() -> None:
     Télécharger les zones inondables PPRI via Géorisques /api/v1/gaspar/azi.
     Sauvegarde : data/raw/ppri/zones_inondables_49.json
 
-    Paramètres : rayon (mètres, max empirique ~20 000) + latlon (lon,lat) autour du centre d'Angers.
-    L'API retourne les AZI impactant des communes dans ce rayon, avec code_insee.
+    L'API retourne des métadonnées par commune (code_insee + libelle_azi),
+    sans géométrie polygonale. La jointure dans join.py se fait par code_insee.
     Pagination complète jusqu'à épuisement des pages.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """

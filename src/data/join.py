@@ -3,6 +3,8 @@ Jointures entre DVF et sources externes : DPE, OSM (équipements),
 IRIS, transports (tram/gare), zones inondables PPRI.
 """
 
+import json
+
 import numpy as np
 import geopandas as gpd
 import pandas as pd
@@ -200,34 +202,55 @@ def join_ppri(df: pd.DataFrame) -> pd.DataFrame:
     """
     Assigner une zone inondable (booléen) à chaque bien via le PPRI.
 
-    Prérequis : data/raw/ppri/zones_inondables_49.geojson
+    Prérequis : data/raw/ppri/zones_inondables_49.json
     (produit par download_ppri)
 
+    L'API Géorisques /gaspar/azi retourne des métadonnées par commune (code_insee),
+    sans géométrie polygonale. La jointure se fait donc par code_insee :
+    un bien est en zone inondable si son code_insee figure dans les AZI Inondation.
+
     Colonne ajoutée :
-    - zone_inondable : 1 si le bien est dans une zone inondable PPRI, 0 sinon
+    - zone_inondable : 1 si la commune du bien a une AZI de type Inondation, 0 sinon
     """
-    ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
+    ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.json"
     if not ppri_path.exists():
         logger.warning("⚠ PPRI introuvable, zone_inondable non assignée")
         return df
 
-    logger.info("Jointure PPRI (zones inondables)...")
-    ppri = gpd.read_file(ppri_path).to_crs(EPSG_LAMBERT)
+    logger.info("Jointure PPRI (zones inondables par code_insee)...")
 
-    gdf_dvf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
-        crs=EPSG_WGS84,
-    ).to_crs(EPSG_LAMBERT)
+    records = json.loads(ppri_path.read_text(encoding="utf-8"))
 
-    joined = gpd.sjoin(gdf_dvf, ppri[["geometry"]], how="left", predicate="within")
+    # Extraire les code_insee des communes avec au moins une AZI de type Inondation
+    communes_inondables: set[str] = set()
+    for rec in records:
+        risques = rec.get("liste_libelle_risque", [])
+        is_flood = any(
+            "nondation" in r.get("libelle_risque_long", "") or r.get("num_risque", "") == "11"
+            for r in risques
+        )
+        if not is_flood:
+            continue
+        for commune in rec.get("liste_commune_impactee", []):
+            code = commune.get("code_insee")
+            if code:
+                communes_inondables.add(str(code))
+
+    if not communes_inondables:
+        logger.warning("⚠ Aucune commune inondable extraite du PPRI, zone_inondable=0 partout")
+        df = df.copy()
+        df["zone_inondable"] = 0
+        return df
+
     df = df.copy()
-    df["zone_inondable"] = joined.index.isin(
-        joined[joined["index_right"].notna()].index
-    ).astype(int)
+    # code_commune_insee dans le DVF est sur 5 caractères (ex: '49007')
+    df["zone_inondable"] = df["code_commune"].astype(str).isin(communes_inondables).astype(int)
 
     n_inond = df["zone_inondable"].sum()
-    logger.info(f"✓ Zone inondable assignée ({n_inond:,} biens en zone PPRI)")
+    logger.info(
+        f"✓ Zone inondable assignée ({n_inond:,} biens en commune PPRI inondation, "
+        f"{len(communes_inondables)} communes concernées)"
+    )
     return df
 
 
