@@ -9,7 +9,7 @@ Sources :
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
 - Contours IRIS : IGN via WFS data.geopf.fr (STATISTICALUNITS.IRISGE:iris_ge)
 - Arrêts tram/gare : data.angers.fr (GTFS stops Irigo) + OSM (gare SNCF)
-- Zones inondables PPRI : Géorisques API /api/v1/azi par commune
+- Zones inondables PPRI : Géorisques /api/v1/gaspar/azi (rayon + latlon)
 """
 
 import gzip
@@ -51,34 +51,11 @@ GARE_OVERPASS_QUERY = (
     "out;"
 )
 
-# PPRI Maine-et-Loire — zones inondables via API Géorisques /api/v1/azi
-# Requête par codeInsee commune ; communes Angers Loire Métropole (dep 49)
-PPRI_AZI_URL = "https://www.georisques.gouv.fr/api/v1/azi"
-
-# Communes Angers Loire Métropole (code INSEE — dep 49)
-ALM_COMMUNES_INSEE = [
-    "49007",  # Angers
-    "49009",  # Les Ponts-de-Cé
-    "49020",  # Beaucouzé
-    "49023",  # Béhuard
-    "49032",  # Brain-sur-l'Authion
-    "49050",  # Cantenay-Épinard
-    "49062",  # Murs-Érigné (ex-Corzé partiel)
-    "49099",  # Écouflant
-    "49119",  # Feneu
-    "49125",  # Saint-Jean-de-Linières
-    "49145",  # Loire-Authion
-    "49172",  # Longuenée-en-Anjou
-    "49220",  # Pellouailles-les-Vignes
-    "49228",  # Le Plessis-Grammoire
-    "49244",  # Sainte-Gemmes-sur-Loire
-    "49260",  # Saint-Barthélemy-d'Anjou
-    "49277",  # Saint-Clément-de-la-Place
-    "49307",  # Sarrigné
-    "49323",  # Soulaines-sur-Aubance
-    "49355",  # Trélazé
-    "49373",  # Verrières-en-Anjou
-]
+# PPRI — Atlas des Zones Inondables via Géorisques /api/v1/gaspar/azi
+# Paramètres : rayon (mètres) + latlon (lon,lat) — centre Angers
+PPRI_GASPAR_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
+PPRI_CENTER_LATLON = "-0.556,47.478"  # lon,lat centre Angers
+PPRI_RAYON = 25_000  # 25 km autour d'Angers
 
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
@@ -458,12 +435,12 @@ def download_arrets_transport() -> None:
 
 def download_ppri() -> None:
     """
-    Télécharger les zones inondables PPRI via l'API Géorisques /api/v1/azi.
+    Télécharger les zones inondables PPRI via Géorisques /api/v1/gaspar/azi.
     Sauvegarde : data/raw/ppri/zones_inondables_49.json
 
-    L'endpoint /gaspar/azi ne retourne que des métadonnées sans géométries.
-    On utilise /api/v1/azi?codeInsee={code} qui indique si la commune est
-    couverte par un AZI (Atlas des Zones Inondables) — donnée booléenne par commune.
+    Paramètres : rayon (mètres) + latlon (lon,lat) autour du centre d'Angers.
+    L'API retourne les AZI impactant des communes dans ce rayon, avec code_insee.
+    Pagination complète jusqu'à épuisement des pages.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
     dest = DATA_RAW_DIR / "ppri" / "zones_inondables_49.json"
@@ -472,31 +449,44 @@ def download_ppri() -> None:
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Téléchargement zones inondables PPRI (communes ALM)...")
+    logger.info("Téléchargement zones inondables PPRI (Angers, rayon 25 km)...")
 
-    results: list[dict] = []
-    errors = 0
+    all_records: list[dict] = []
+    page = 1
+    page_size = 100
 
-    for code_insee in ALM_COMMUNES_INSEE:
+    while True:
         try:
             r = requests.get(
-                PPRI_AZI_URL,
-                params={"codeInsee": code_insee},
-                timeout=30,
+                PPRI_GASPAR_URL,
+                params={
+                    "rayon": PPRI_RAYON,
+                    "latlon": PPRI_CENTER_LATLON,
+                    "page": page,
+                    "page_size": page_size,
+                },
+                timeout=60,
             )
             r.raise_for_status()
             data = r.json()
-            results.append({"code_insee": code_insee, "azi": data})
         except requests.RequestException as e:
-            logger.warning(f"  ⚠ Erreur PPRI commune {code_insee} : {e}")
-            errors += 1
+            logger.warning(f"⚠ Impossible de télécharger le PPRI ({e}), zone_inondable non assignée")
+            return
 
-    if not results:
-        logger.warning("⚠ Impossible de télécharger le PPRI, zone_inondable non assignée")
+        records = data.get("data", [])
+        all_records.extend(records)
+
+        total_pages = data.get("total_pages", 1)
+        if page >= total_pages or len(records) < page_size:
+            break
+        page += 1
+
+    if not all_records:
+        logger.warning("⚠ Aucune zone PPRI reçue, zone_inondable non assignée")
         return
 
-    dest.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
-    logger.info(f"✓ PPRI téléchargé : {len(results)} communes → {dest.name}" + (f" ({errors} erreurs)" if errors else ""))
+    dest.write_text(json.dumps(all_records, ensure_ascii=False), encoding="utf-8")
+    logger.info(f"✓ PPRI téléchargé : {len(all_records)} entrées → {dest.name}")
 
 
 def download_all() -> None:
