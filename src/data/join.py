@@ -205,12 +205,13 @@ def join_ppri(df: pd.DataFrame) -> pd.DataFrame:
     Prérequis : data/raw/ppri/zones_inondables_49.json
     (produit par download_ppri)
 
-    L'API Géorisques /gaspar/azi retourne des métadonnées par commune (code_insee),
-    sans géométrie polygonale. La jointure se fait donc par code_insee :
-    un bien est en zone inondable si son code_insee figure dans les AZI Inondation.
+    L'API Géorisques /gaspar/azi retourne une entrée par couple (AZI, commune).
+    Chaque record contient directement code_insee + liste_libelle_risque.
+    Un bien est en zone inondable si son code_commune figure parmi les communes
+    ayant une AZI de type Inondation (num_risque == "11").
 
     Colonne ajoutée :
-    - zone_inondable : 1 si la commune du bien a une AZI de type Inondation, 0 sinon
+    - zone_inondable : 1 si la commune du bien a une AZI Inondation, 0 sinon
     """
     ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.json"
     if not ppri_path.exists():
@@ -221,20 +222,16 @@ def join_ppri(df: pd.DataFrame) -> pd.DataFrame:
 
     records = json.loads(ppri_path.read_text(encoding="utf-8"))
 
-    # Extraire les code_insee des communes avec au moins une AZI de type Inondation
+    # Chaque record = une entrée (AZI, commune) avec code_insee directement
     communes_inondables: set[str] = set()
     for rec in records:
         risques = rec.get("liste_libelle_risque", [])
         is_flood = any(
-            "nondation" in r.get("libelle_risque_long", "") or r.get("num_risque", "") == "11"
+            r.get("num_risque") == "11" or "nondation" in r.get("libelle_risque_long", "")
             for r in risques
         )
-        if not is_flood:
-            continue
-        for commune in rec.get("liste_commune_impactee", []):
-            code = commune.get("code_insee")
-            if code:
-                communes_inondables.add(str(code))
+        if is_flood and rec.get("code_insee"):
+            communes_inondables.add(str(rec["code_insee"]))
 
     if not communes_inondables:
         logger.warning("⚠ Aucune commune inondable extraite du PPRI, zone_inondable=0 partout")
@@ -243,7 +240,6 @@ def join_ppri(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     df = df.copy()
-    # code_commune_insee dans le DVF est sur 5 caractères (ex: '49007')
     df["zone_inondable"] = df["code_commune"].astype(str).isin(communes_inondables).astype(int)
 
     n_inond = df["zone_inondable"].sum()

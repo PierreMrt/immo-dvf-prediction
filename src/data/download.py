@@ -10,8 +10,7 @@ Sources :
 - Contours IRIS : IGN via WFS data.geopf.fr (STATISTICALUNITS.IRISGE:iris_ge)
 - Arrêts tram/gare : data.angers.fr (GTFS stops Irigo) + OSM (gare SNCF)
 - Zones inondables PPRI : Géorisques /api/v1/gaspar/azi (rayon + latlon, max ~20 km)
-  L'API retourne des métadonnées par commune (code_insee), sans géométrie.
-  La jointure dans join.py se fait par code_insee.
+  Retourne une entrée par couple (AZI, commune) avec code_insee directement dans le record.
 """
 
 import gzip
@@ -29,7 +28,12 @@ from src.utils.logging import logger
 DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz"
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
-OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
+
+# Instances Overpass par ordre de préférence — fallback si timeout
+OVERPASS_URLS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+]
 
 # Contours IRIS via WFS data.geopf.fr (endpoint public, sans clé)
 IRIS_WFS_URL = (
@@ -53,8 +57,7 @@ GARE_OVERPASS_QUERY = (
 )
 
 # PPRI — Atlas des Zones Inondables via Géorisques /api/v1/gaspar/azi
-# Retourne des métadonnées par commune (code_insee), sans géométrie polygonale.
-# La jointure se fait donc par code_insee dans join.py (pas de sjoin spatial).
+# Retourne une entrée par couple (AZI, commune) avec code_insee directement dans le record.
 PPRI_GASPAR_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
 PPRI_CENTER_LATLON = "-0.556,47.478"  # lon,lat centre Angers
 PPRI_RAYON = 20_000  # 20 km (limite empirique de l'API)
@@ -110,12 +113,13 @@ def _overpass_query_with_retry(
 ) -> list[dict]:
     """
     Exécuter une requête Overpass pour un filtre unique avec retry exponentiel.
+    Essaie les instances OVERPASS_URLS dans l'ordre en cas de timeout.
 
     Args:
         osm_filter: Filtre Overpass sans bbox, ex : 'node["shop"]'
         bbox_str: Bbox au format 'lat_min,lon_min,lat_max,lon_max'
         overpass_timeout: Timeout Overpass QL (dans la requête)
-        max_retries: Nombre de tentatives
+        max_retries: Nombre de tentatives par instance
         retry_delay: Délai initial entre tentatives (doublé à chaque échec)
     """
     query = (
@@ -123,23 +127,43 @@ def _overpass_query_with_retry(
         f"(\n  {osm_filter}({bbox_str});\n);\n"
         "out center;"
     )
-    delay = retry_delay
-    for attempt in range(1, max_retries + 1):
+    for overpass_url in OVERPASS_URLS:
+        delay = retry_delay
+        for attempt in range(1, max_retries + 1):
+            try:
+                r = requests.get(
+                    overpass_url,
+                    params={"data": query},
+                    timeout=overpass_timeout + 10,
+                )
+                r.raise_for_status()
+                return r.json().get("elements", [])
+            except (requests.Timeout, requests.HTTPError) as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"    [{overpass_url}] Tentative {attempt}/{max_retries} échouée ({e}), "
+                        f"nouvel essai dans {delay:.0f}s..."
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.warning(f"    [{overpass_url}] échoué après {max_retries} tentatives, essai instance suivante...")
+    raise requests.RequestException(f"Toutes les instances Overpass ont échoué pour : {osm_filter}")
+
+
+def _overpass_raw_with_fallback(query: str, timeout: int = 40) -> list[dict]:
+    """
+    Exécuter une requête Overpass brute (query complète) avec fallback d'instance.
+    Utilisé pour les requêtes ponctuelles (ex : gares SNCF).
+    """
+    for overpass_url in OVERPASS_URLS:
         try:
-            r = requests.get(
-                OVERPASS_URL,
-                params={"data": query},
-                timeout=overpass_timeout + 10,
-            )
+            r = requests.get(overpass_url, params={"data": query}, timeout=timeout)
             r.raise_for_status()
             return r.json().get("elements", [])
-        except (requests.Timeout, requests.HTTPError) as e:
-            if attempt < max_retries:
-                logger.warning(f"    Tentative {attempt}/{max_retries} échouée ({e}), nouvel essai dans {delay:.0f}s...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                raise
+        except requests.RequestException as e:
+            logger.warning(f"    [{overpass_url}] échoué ({e}), essai instance suivante...")
+    raise requests.RequestException("Toutes les instances Overpass ont échoué")
 
 
 def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
@@ -240,8 +264,8 @@ def download_dpe(code_postal_prefix: str = "490") -> None:
 
 def download_equipements_osm(bbox: tuple[float, float, float, float] | None = None) -> None:
     """
-    Télécharger les équipements urbains via Overpass API (instance kumi.systems).
-    Une requête atomique par filtre OSM avec retry exponentiel.
+    Télécharger les équipements urbains via Overpass API.
+    Une requête atomique par filtre OSM avec retry exponentiel et fallback d'instance.
 
     Args:
         bbox: (lat_min, lon_min, lat_max, lon_max) — défaut : zone Angers
@@ -354,6 +378,7 @@ def download_arrets_transport() -> None:
 
     - Tram : dataset GTFS stops Irigo (tous les stops, sans filtre route_type absent du dataset)
     - Gare : nœud OSM railway=station dans la bbox élargie couvrant Saint-Laud (lon ~-0.5526)
+      Fallback automatique sur overpass-api.de si kumi.systems timeout.
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
     if dest.exists():
@@ -404,16 +429,10 @@ def download_arrets_transport() -> None:
 
     logger.info(f"  ✓ {tram_count} arrêts tram")
 
-    # --- Gare SNCF via Overpass ---
+    # --- Gare SNCF via Overpass (avec fallback d'instance) ---
     logger.info("Téléchargement gares SNCF (Overpass)...")
     try:
-        r = requests.get(
-            OVERPASS_URL,
-            params={"data": GARE_OVERPASS_QUERY},
-            timeout=40,
-        )
-        r.raise_for_status()
-        elements = r.json().get("elements", [])
+        elements = _overpass_raw_with_fallback(GARE_OVERPASS_QUERY, timeout=40)
         for el in elements:
             tags = el.get("tags", {})
             rows.append({
@@ -424,7 +443,7 @@ def download_arrets_transport() -> None:
             })
         logger.info(f"  ✓ {len(elements)} gare(s) SNCF")
     except requests.RequestException as e:
-        logger.warning(f"⚠ Erreur gares Overpass ({e})")
+        logger.warning(f"⚠ Erreur gares Overpass ({e}), distance_gare_proche_m sera NaN")
 
     if not rows:
         logger.warning("⚠ Aucun arrêt transport récupéré")
@@ -440,8 +459,8 @@ def download_ppri() -> None:
     Télécharger les zones inondables PPRI via Géorisques /api/v1/gaspar/azi.
     Sauvegarde : data/raw/ppri/zones_inondables_49.json
 
-    L'API retourne des métadonnées par commune (code_insee + libelle_azi),
-    sans géométrie polygonale. La jointure dans join.py se fait par code_insee.
+    L'API retourne une entrée par couple (AZI, commune) avec code_insee directement
+    dans chaque record (pas dans une liste imbriquée).
     Pagination complète jusqu'à épuisement des pages.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
