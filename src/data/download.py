@@ -29,7 +29,8 @@ DVF_BASE_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departemen
 DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lines"
 DPE_BATCH_SIZE = 10_000
 
-# Instances Overpass par ordre de préférence — fallback si timeout
+# Instances Overpass par ordre de préférence — fallback si timeout/erreur
+# Les deux acceptent les requêtes POST form-encoded : data=<query>
 OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
@@ -104,6 +105,20 @@ def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
                 f.write(chunk)
 
 
+def _overpass_post(url: str, query: str, timeout: int) -> requests.Response:
+    """
+    Envoyer une requête Overpass en POST form-encoded.
+    Les deux instances (kumi.systems et overpass-api.de) exigent ce format.
+    GET avec params= encode la query dans l'URL → 406 sur overpass-api.de.
+    """
+    return requests.post(
+        url,
+        data={"data": query},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout,
+    )
+
+
 def _overpass_query_with_retry(
     osm_filter: str,
     bbox_str: str,
@@ -113,7 +128,7 @@ def _overpass_query_with_retry(
 ) -> list[dict]:
     """
     Exécuter une requête Overpass pour un filtre unique avec retry exponentiel.
-    Essaie les instances OVERPASS_URLS dans l'ordre en cas de timeout.
+    Essaie les instances OVERPASS_URLS dans l'ordre en cas de timeout/erreur.
 
     Args:
         osm_filter: Filtre Overpass sans bbox, ex : 'node["shop"]'
@@ -131,11 +146,7 @@ def _overpass_query_with_retry(
         delay = retry_delay
         for attempt in range(1, max_retries + 1):
             try:
-                r = requests.get(
-                    overpass_url,
-                    params={"data": query},
-                    timeout=overpass_timeout + 10,
-                )
+                r = _overpass_post(overpass_url, query, timeout=overpass_timeout + 10)
                 r.raise_for_status()
                 return r.json().get("elements", [])
             except (requests.Timeout, requests.HTTPError) as e:
@@ -153,12 +164,13 @@ def _overpass_query_with_retry(
 
 def _overpass_raw_with_fallback(query: str, timeout: int = 40) -> list[dict]:
     """
-    Exécuter une requête Overpass brute (query complète) avec fallback d'instance.
+    Exécuter une requête Overpass brute (query complète) en POST avec fallback d'instance.
     Utilisé pour les requêtes ponctuelles (ex : gares SNCF).
+    POST form-encoded requis — GET provoque un 406 sur overpass-api.de.
     """
     for overpass_url in OVERPASS_URLS:
         try:
-            r = requests.get(overpass_url, params={"data": query}, timeout=timeout)
+            r = _overpass_post(overpass_url, query, timeout=timeout)
             r.raise_for_status()
             return r.json().get("elements", [])
         except requests.RequestException as e:
@@ -378,7 +390,7 @@ def download_arrets_transport() -> None:
 
     - Tram : dataset GTFS stops Irigo (tous les stops, sans filtre route_type absent du dataset)
     - Gare : nœud OSM railway=station dans la bbox élargie couvrant Saint-Laud (lon ~-0.5526)
-      Fallback automatique sur overpass-api.de si kumi.systems timeout.
+      Envoi en POST form-encoded — fallback automatique sur overpass-api.de si kumi.systems timeout.
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
     if dest.exists():
@@ -429,7 +441,7 @@ def download_arrets_transport() -> None:
 
     logger.info(f"  ✓ {tram_count} arrêts tram")
 
-    # --- Gare SNCF via Overpass (avec fallback d'instance) ---
+    # --- Gare SNCF via Overpass POST (avec fallback d'instance) ---
     logger.info("Téléchargement gares SNCF (Overpass)...")
     try:
         elements = _overpass_raw_with_fallback(GARE_OVERPASS_QUERY, timeout=40)
