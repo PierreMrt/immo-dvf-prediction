@@ -1,5 +1,6 @@
 """
-Téléchargement des données DVF, DPE, équipements OSM et contours IRIS depuis leurs URLs stables.
+Téléchargement des données DVF, DPE, équipements OSM, contours IRIS,
+arrêts de transport (tram/gare) et zones inondables PPRI.
 
 Sources :
 - DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
@@ -7,9 +8,12 @@ Sources :
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
 - Contours IRIS : IGN via data.gouv.fr (GeoJSON du département)
+- Arrêts tram/gare : data.angers.fr (tram) + OSM (gare SNCF)
+- Zones inondables PPRI : data.gouv.fr (GeoJSON Maine-et-Loire)
 """
 
 import gzip
+import json
 import shutil
 import time
 from pathlib import Path
@@ -25,21 +29,17 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-# URL stable IGN/data.gouv — millésime 2023 (mis à jour chaque année)
-# Format : contours IRIS nationaux filtrés sur le département voulu
 IRIS_BASE_URL = (
     "https://wxs.ign.fr/1yhlj2ehpqf3q6dt6a2y7b64/telechargement/inspire/"
     "CONTOURS-IRIS-2023-01-01$CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01/"
     "file/CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01.7z"
 )
-# Alternative data.gouv directe (GeoJSON simplifié, plus léger)
 IRIS_GEOJSON_URL = (
     "https://data.geopf.fr/wfs/ows"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
     "&TYPENAMES=BDTOPO_V3:zone_d_activite_ou_d_interet"
     "&outputFormat=application/json"
 )
-# URL spécifique contours IRIS 2023 via API Géoplateforme IGN (GeoJSON natif)
 IRIS_API_URL = (
     "https://data.geopf.fr/wfs/ows"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
@@ -49,10 +49,30 @@ IRIS_API_URL = (
     "&count=5000"
 )
 
+# Arrêts tram Angers via data.angers.fr (API ODS)
+TRAM_STOPS_URL = (
+    "https://data.angers.fr/api/explore/v2.1/catalog/datasets/"
+    "am_arrets_lignes/records?limit=100&where=mode_transport%3D'TRAM'"
+)
+# Gare Saint-Serge via Overpass (nœud OSM fixe)
+GARE_OVERPASS_QUERY = (
+    "[out:json][timeout:30];\n"
+    "node[\"railway\"=\"station\"](47.40,-0.65,47.55,-0.45);\n"
+    "out;"
+)
+# PPRI Maine-et-Loire — zones inondables data.gouv.fr
+PPRI_URL = (
+    "https://data.geopf.fr/wfs/ows"
+    "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+    "&TYPENAMES=BDTOPO_V3:zone_de_risque_naturel"
+    "&outputFormat=application/json"
+    "&CQL_FILTER=code_departement='49'"
+    "&count=2000"
+)
+
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
 
-# Colonnes à conserver depuis dpe03existant (noms confirmés via API)
 DPE_COLS_TO_KEEP = [
     "numero_dpe",
     "date_etablissement_dpe",
@@ -71,7 +91,6 @@ DPE_COLS_TO_KEEP = [
     "type_batiment",
 ]
 
-# Une entrée par filtre OSM atomique : (categorie, filtre_overpass)
 OSM_FILTERS: list[tuple[str, str]] = [
     ("commerce",   'node["shop"]'),
     ("restaurant", 'node["amenity"="restaurant"]'),
@@ -268,7 +287,6 @@ def download_equipements_osm(bbox: tuple[float, float, float, float] | None = No
                 "nom": tags.get("name", ""),
             })
         logger.info(f"    ✓ {len(elements)} éléments")
-        # Pause courte entre requêtes pour ne pas saturer le serveur
         time.sleep(2)
 
     if not all_rows:
@@ -329,7 +347,6 @@ def download_iris(dep: str | None = None) -> None:
         all_features.extend(features)
         start_index += len(features)
 
-        # Arrêt si moins de résultats que le batch (dernière page)
         if len(features) < 1000:
             break
 
@@ -342,9 +359,143 @@ def download_iris(dep: str | None = None) -> None:
         "features": all_features,
     }
 
-    import json
     dest.write_text(json.dumps(geojson, ensure_ascii=False), encoding="utf-8")
     logger.info(f"✓ Contours IRIS téléchargés : {len(all_features)} zones → {dest.name}")
+
+
+def download_arrets_transport() -> None:
+    """
+    Télécharger les arrêts tram depuis data.angers.fr et la gare SNCF via Overpass.
+    Sauvegarde : data/raw/transport/arrets_transport.parquet
+
+    - Tram : API ODS data.angers.fr, filtre mode_transport=TRAM
+    - Gare : nœud OSM railway=station dans la bbox Angers
+    """
+    dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
+    if dest.exists():
+        logger.info(f"Arrêts transport déjà présents, saut ({dest.name})")
+        return
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+
+    # --- Arrêts tram via data.angers.fr ---
+    logger.info("Téléchargement arrêts tram (data.angers.fr)...")
+    offset = 0
+    limit = 100
+    while True:
+        try:
+            r = requests.get(
+                "https://data.angers.fr/api/explore/v2.1/catalog/datasets/"
+                "am_arrets_lignes/records",
+                params={"limit": limit, "offset": offset, "where": "mode_transport='TRAM'"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except requests.RequestException as e:
+            logger.warning(f"⚠ Erreur arrêts tram ({e})")
+            break
+
+        records = data.get("results", [])
+        if not records:
+            break
+
+        for rec in records:
+            geo = rec.get("geo_point_2d") or {}
+            lat = geo.get("lat") or rec.get("lat")
+            lon = geo.get("lon") or rec.get("lon")
+            if lat and lon:
+                rows.append({
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "type": "tram",
+                    "nom": rec.get("nom_arret", ""),
+                })
+
+        offset += limit
+        if len(records) < limit:
+            break
+
+    logger.info(f"  ✓ {sum(1 for r in rows if r['type'] == 'tram')} arrêts tram")
+
+    # --- Gare SNCF via Overpass ---
+    logger.info("Téléchargement gares SNCF (Overpass)...")
+    try:
+        r = requests.get(
+            OVERPASS_URL,
+            params={"data": GARE_OVERPASS_QUERY},
+            timeout=40,
+        )
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
+        for el in elements:
+            tags = el.get("tags", {})
+            rows.append({
+                "lat": el["lat"],
+                "lon": el["lon"],
+                "type": "gare",
+                "nom": tags.get("name", ""),
+            })
+        logger.info(f"  ✓ {len(elements)} gare(s) SNCF")
+    except requests.RequestException as e:
+        logger.warning(f"⚠ Erreur gares Overpass ({e})")
+
+    if not rows:
+        logger.warning("⚠ Aucun arrêt transport récupéré")
+        return
+
+    df = pd.DataFrame(rows)
+    df.to_parquet(dest, index=False)
+    logger.info(f"✓ Arrêts transport sauvegardés : {len(df)} → {dest.name}")
+
+
+def download_ppri() -> None:
+    """
+    Télécharger les zones inondables PPRI du Maine-et-Loire via la Géoplateforme IGN.
+    Sauvegarde : data/raw/ppri/zones_inondables_49.geojson
+
+    Utilise le WFS BDTOPO zone_de_risque_naturel filtré sur le département 49.
+    Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
+    """
+    dest = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
+    if dest.exists():
+        logger.info(f"PPRI déjà présent, saut ({dest.name})")
+        return
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Téléchargement zones inondables PPRI (département 49)...")
+
+    all_features: list[dict] = []
+    start_index = 0
+
+    while True:
+        url = f"{PPRI_URL}&startIndex={start_index}"
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+        except requests.RequestException as e:
+            logger.warning(f"⚠ Impossible de télécharger le PPRI ({e}), zone_inondable non assignée")
+            return
+
+        features = data.get("features", [])
+        if not features:
+            break
+
+        all_features.extend(features)
+        start_index += len(features)
+
+        if len(features) < 2000:
+            break
+
+    if not all_features:
+        logger.warning("⚠ Aucune zone PPRI reçue, zone_inondable non assignée")
+        return
+
+    geojson = {"type": "FeatureCollection", "features": all_features}
+    dest.write_text(json.dumps(geojson, ensure_ascii=False), encoding="utf-8")
+    logger.info(f"✓ PPRI téléchargé : {len(all_features)} zones → {dest.name}")
 
 
 def download_all() -> None:
@@ -353,6 +504,8 @@ def download_all() -> None:
     download_dpe()
     download_equipements_osm()
     download_iris()
+    download_arrets_transport()
+    download_ppri()
 
 
 if __name__ == "__main__":

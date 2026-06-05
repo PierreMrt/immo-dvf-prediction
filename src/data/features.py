@@ -26,6 +26,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     - age_bien (depuis annee_construction)
     - prix_m2_median_quartier, nb_ventes_quartier, prix_m2_vs_quartier
     - score_commodites
+    - distance_tram_proche_m, distance_gare_proche_m (depuis join_transports)
+    - zone_inondable (depuis join_ppri)
     """
     df = df.copy()
 
@@ -63,6 +65,16 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     available = [c for c in commodite_cols if c in df.columns]
     if available:
         df["score_commodites"] = df[available].sum(axis=1)
+
+    # distance_tram_proche_m et distance_gare_proche_m sont déjà calculées
+    # dans join_transports() — on vérifie simplement leur présence
+    for col in ["distance_tram_proche_m", "distance_gare_proche_m"]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # zone_inondable est déjà calculée dans join_ppri()
+    if "zone_inondable" not in df.columns:
+        df["zone_inondable"] = np.nan
 
     return df
 

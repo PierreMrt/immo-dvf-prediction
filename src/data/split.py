@@ -22,18 +22,26 @@ BASE_FEATURES = [
 ]
 
 OPTIONAL_FEATURES = [
+    # DPE
     "dpe_ordinal",
     "dpe_bonus",
     "dpe_malus",
     "age_bien",
+    # Quartier
     "prix_m2_median_quartier",
     "nb_ventes_quartier",
     "prix_m2_vs_quartier",
+    # Équipements OSM
     "nb_commerces_500m",
     "nb_restaurants_500m",
     "nb_ecoles_500m",
     "nb_parcs_500m",
     "score_commodites",
+    # Transports
+    "distance_tram_proche_m",
+    "distance_gare_proche_m",
+    # Risques
+    "zone_inondable",
 ]
 
 TARGET = "prix_m2"
@@ -65,7 +73,6 @@ def split_dataset() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
         X, y, test_size=settings.test_size, random_state=settings.random_seed
     )
 
-    # Sauvegarder les splits
     split_dir = DATA_PROCESSED_DIR / "train_test_split"
     split_dir.mkdir(parents=True, exist_ok=True)
     X_train.to_parquet(split_dir / "X_train.parquet", index=False)

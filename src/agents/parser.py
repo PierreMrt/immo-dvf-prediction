@@ -4,8 +4,10 @@ Utilise le client OpenAI compatible avec OpenRouter pour parser le texte brut.
 """
 
 import json
+from datetime import datetime
 from typing import Optional
 
+import requests
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -13,6 +15,8 @@ from src.agents.scraper import fetch_annonce_text
 from src.models.predict import AppartementInput
 from src.utils.config import settings
 from src.utils.logging import logger
+
+BAN_GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
 
 
 class AnnonceFeatures(BaseModel):
@@ -52,6 +56,40 @@ Réponds UNIQUEMENT avec un JSON valide contenant les champs suivants
 """
 
 
+def geocode_adresse(adresse: str) -> tuple[float, float] | None:
+    """
+    Géocoder une adresse via l'API Adresse data.gouv.fr (BAN).
+
+    Args:
+        adresse: Adresse textuelle (ex: "12 rue de la Paix, Angers")
+
+    Returns:
+        (latitude, longitude) ou None si échec
+    """
+    try:
+        r = requests.get(
+            BAN_GEOCODE_URL,
+            params={"q": adresse, "limit": 1, "citycode": "49007"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        features = r.json().get("features", [])
+        if not features:
+            logger.warning(f"⚠ Géocodage sans résultat pour : {adresse}")
+            return None
+        coords = features[0]["geometry"]["coordinates"]
+        lon, lat = coords[0], coords[1]
+        score = features[0]["properties"].get("score", 0)
+        if score < 0.5:
+            logger.warning(f"⚠ Géocodage de faible confiance (score={score:.2f}) pour : {adresse}")
+            return None
+        logger.info(f"✓ Géocodage : {adresse} → ({lat:.5f}, {lon:.5f}) score={score:.2f}")
+        return lat, lon
+    except requests.RequestException as e:
+        logger.warning(f"⚠ Erreur géocodage ({e})")
+        return None
+
+
 class AnnonceParser:
     """Agent LLM pour parser les annonces immobilières."""
 
@@ -78,7 +116,6 @@ class AnnonceParser:
             logger.warning("Texte vide, retour de features nulles")
             return AnnonceFeatures()
 
-        # Tronquer le texte si trop long
         text_truncated = text[:8000]
 
         logger.info("Extraction des caractéristiques via LLM...")
@@ -102,6 +139,7 @@ class AnnonceParser:
     def to_appart_input(self, features: AnnonceFeatures) -> AppartementInput:
         """
         Convertir les AnnonceFeatures en AppartementInput pour la prédiction.
+        Inclut le géocodage de l'adresse pour alimenter les features spatiales.
 
         Args:
             features: Caractéristiques extraites de l'annonce
@@ -116,12 +154,100 @@ class AnnonceParser:
         dpe_malus = int(features.dpe_classe in ["F", "G"]) if features.dpe_classe else None
         age_bien = (ANNEE_REF - features.annee_construction) if features.annee_construction else None
 
-        return AppartementInput(
+        now = datetime.now()
+
+        appart = AppartementInput(
             surface_m2=features.surface_m2 or 50.0,
             nombre_pieces=features.nombre_pieces or 3,
             nb_lots_copro=features.nb_lots_copro or 20,
+            mois_vente=now.month,
+            annee_vente=now.year,
             dpe_ordinal=dpe_ordinal,
             dpe_bonus=dpe_bonus,
             dpe_malus=dpe_malus,
             age_bien=age_bien,
         )
+
+        # Géocodage → features spatiales
+        adresse = features.adresse or features.quartier
+        if adresse:
+            coords = geocode_adresse(f"{adresse}, Angers")
+            if coords:
+                lat, lon = coords
+                appart = _enrich_with_spatial_features(appart, lat, lon)
+
+        return appart
+
+
+def _enrich_with_spatial_features(
+    appart: AppartementInput,
+    lat: float,
+    lon: float,
+) -> AppartementInput:
+    """
+    Enrichir un AppartementInput avec les features spatiales
+    calculées depuis les fichiers précalculés (transport, PPRI, stats IRIS).
+
+    Args:
+        appart: Input à enrichir
+        lat: Latitude WGS-84
+        lon: Longitude WGS-84
+
+    Returns:
+        AppartementInput enrichi (nouvelles valeurs si fichiers disponibles)
+    """
+    import geopandas as gpd
+    from shapely.geometry import Point
+    from src.utils.config import DATA_RAW_DIR, DATA_PROCESSED_DIR
+
+    point_wgs84 = Point(lon, lat)
+    EPSG_WGS84 = 4326
+    EPSG_LAMBERT = 2154
+
+    # --- Distance tram et gare ---
+    transport_path = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
+    if transport_path.exists():
+        import pandas as pd
+        transport = pd.read_parquet(transport_path)
+        gdf_transport = gpd.GeoDataFrame(
+            transport,
+            geometry=gpd.points_from_xy(transport["lon"], transport["lat"]),
+            crs=EPSG_WGS84,
+        ).to_crs(EPSG_LAMBERT)
+
+        pt_lambert = gpd.GeoSeries([point_wgs84], crs=EPSG_WGS84).to_crs(EPSG_LAMBERT).iloc[0]
+
+        for transport_type, field in [("tram", "distance_tram_proche_m"), ("gare", "distance_gare_proche_m")]:
+            subset = gdf_transport[gdf_transport["type"] == transport_type]
+            if not subset.empty:
+                dist = float(subset.geometry.distance(pt_lambert).min())
+                object.__setattr__(appart, field, dist)
+
+    # --- Zone inondable ---
+    ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
+    if ppri_path.exists():
+        ppri = gpd.read_file(ppri_path).to_crs(EPSG_LAMBERT)
+        pt_lambert = gpd.GeoSeries([point_wgs84], crs=EPSG_WGS84).to_crs(EPSG_LAMBERT).iloc[0]
+        in_flood_zone = int(ppri.geometry.contains(pt_lambert).any())
+        object.__setattr__(appart, "zone_inondable", in_flood_zone)
+
+    # --- Stats quartier depuis le dataset features précalculé ---
+    features_path = DATA_PROCESSED_DIR / "dvf_angers_features.parquet"
+    iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
+    if features_path.exists() and iris_path.exists():
+        import pandas as pd
+        iris_geo = gpd.read_file(iris_path)
+        gdf_pt = gpd.GeoDataFrame(
+            [{"geometry": point_wgs84}], crs=EPSG_WGS84
+        )
+        joined = gpd.sjoin(gdf_pt, iris_geo[["CODE_IRIS", "geometry"]], how="left", predicate="within")
+        code_iris = joined["CODE_IRIS"].iloc[0] if not joined.empty else None
+
+        if code_iris:
+            df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
+            iris_stats = df_feat[df_feat["code_iris"] == code_iris]["prix_m2"]
+            if not iris_stats.empty:
+                object.__setattr__(appart, "prix_m2_median_quartier", float(iris_stats.median()))
+                object.__setattr__(appart, "nb_ventes_quartier", int(len(iris_stats)))
+
+    return appart

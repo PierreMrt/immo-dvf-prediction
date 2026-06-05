@@ -1,7 +1,9 @@
 """
-Jointures entre DVF et sources externes : DPE, OSM (équipements), IRIS.
+Jointures entre DVF et sources externes : DPE, OSM (équipements),
+IRIS, transports (tram/gare), zones inondables PPRI.
 """
 
+import numpy as np
 import geopandas as gpd
 import pandas as pd
 
@@ -69,10 +71,8 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
     dpe_cols_available = [c for c in dpe_cols_keep if c in dpe.columns]
     dpe = dpe[dpe_cols_available].copy()
 
-    # Normaliser adresses DPE
     dpe["adresse_norm"] = normalize_adresse_ban(dpe["adresse_ban"])
 
-    # Garder le DPE le plus récent par adresse
     if "date_etablissement_dpe" in dpe.columns:
         dpe = (
             dpe.sort_values("date_etablissement_dpe", ascending=False)
@@ -83,7 +83,6 @@ def join_dpe(df: pd.DataFrame) -> pd.DataFrame:
 
     dpe = dpe.drop(columns=["adresse_ban", "date_etablissement_dpe"], errors="ignore")
 
-    # Log quelques exemples pour diagnostic
     logger.info(f"  Exemple clés DPE  : {dpe['adresse_norm'].head(5).tolist()}")
     logger.info(f"  Exemple clés DVF  : {df['adresse_norm'].head(5).tolist()}")
 
@@ -129,10 +128,97 @@ def join_equipements_osm(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def join_transports(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculer la distance au tram le plus proche et à la gare la plus proche.
+
+    Prérequis : data/raw/transport/arrets_transport.parquet
+    (produit par download_arrets_transport)
+
+    Colonnes ajoutées :
+    - distance_tram_proche_m : distance en mètres à l'arrêt de tram le plus proche
+    - distance_gare_proche_m : distance en mètres à la gare SNCF la plus proche
+    """
+    transport_path = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
+    if not transport_path.exists():
+        logger.warning("⚠ Arrêts transport introuvables, distances non calculées")
+        return df
+
+    logger.info("Jointure transports (distance tram/gare)...")
+    transport = pd.read_parquet(transport_path)
+
+    gdf_dvf = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
+        crs=EPSG_WGS84,
+    ).to_crs(EPSG_LAMBERT)
+
+    df = df.copy()
+
+    for transport_type, col_name in [("tram", "distance_tram_proche_m"), ("gare", "distance_gare_proche_m")]:
+        subset = transport[transport["type"] == transport_type]
+        if subset.empty:
+            logger.warning(f"⚠ Aucun arrêt de type '{transport_type}' trouvé")
+            df[col_name] = np.nan
+            continue
+
+        gdf_transport = gpd.GeoDataFrame(
+            subset,
+            geometry=gpd.points_from_xy(subset["lon"], subset["lat"]),
+            crs=EPSG_WGS84,
+        ).to_crs(EPSG_LAMBERT)
+
+        distances = gdf_dvf.geometry.apply(
+            lambda pt: gdf_transport.geometry.distance(pt).min()
+        )
+        df[col_name] = distances.values
+
+    n_tram = df["distance_tram_proche_m"].notna().sum()
+    logger.info(f"✓ Distances transport calculées ({n_tram:,} biens)")
+    return df
+
+
+def join_ppri(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assigner une zone inondable (booléen) à chaque bien via le PPRI.
+
+    Prérequis : data/raw/ppri/zones_inondables_49.geojson
+    (produit par download_ppri)
+
+    Colonne ajoutée :
+    - zone_inondable : 1 si le bien est dans une zone inondable PPRI, 0 sinon
+    """
+    ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
+    if not ppri_path.exists():
+        logger.warning("⚠ PPRI introuvable, zone_inondable non assignée")
+        return df
+
+    logger.info("Jointure PPRI (zones inondables)...")
+    ppri = gpd.read_file(ppri_path).to_crs(EPSG_LAMBERT)
+
+    gdf_dvf = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
+        crs=EPSG_WGS84,
+    ).to_crs(EPSG_LAMBERT)
+
+    joined = gpd.sjoin(gdf_dvf, ppri[["geometry"]], how="left", predicate="within")
+    df = df.copy()
+    df["zone_inondable"] = joined.index.isin(
+        joined[joined["index_right"].notna()].index
+    ).astype(int)
+
+    n_inond = df["zone_inondable"].sum()
+    logger.info(f"✓ Zone inondable assignée ({n_inond:,} biens en zone PPRI)")
+    return df
+
+
 def run_all_joins(df: pd.DataFrame) -> pd.DataFrame:
     df = join_iris(df)
     df = join_dpe(df)
     df = join_equipements_osm(df)
+    df = join_transports(df)
+    df = join_ppri(df)
     return df
 
 

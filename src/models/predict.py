@@ -37,6 +37,11 @@ class AppartementInput:
     nb_ecoles_500m: Optional[int] = None
     nb_parcs_500m: Optional[int] = None
     score_commodites: Optional[int] = None
+    # Transports (optionnel — alimenté par géocodage)
+    distance_tram_proche_m: Optional[float] = None
+    distance_gare_proche_m: Optional[float] = None
+    # Risques (optionnel — alimenté par géocodage)
+    zone_inondable: Optional[int] = None
 
 
 @dataclass
@@ -78,7 +83,6 @@ class ImmoPricePredictor:
         Returns:
             PredictionResult avec prix prédit et métadonnées
         """
-        # Construire le vecteur de features
         data = {
             "surface_m2": appart.surface_m2,
             "nombre_pieces": appart.nombre_pieces,
@@ -90,19 +94,19 @@ class ImmoPricePredictor:
             "copro_grande": int(appart.nb_lots_copro > 50),
         }
 
-        # Ajouter les features optionnelles si disponibles
         optional_fields = [
             "dpe_ordinal", "dpe_bonus", "dpe_malus", "age_bien",
             "prix_m2_median_quartier", "nb_ventes_quartier", "prix_m2_vs_quartier",
             "nb_commerces_500m", "nb_restaurants_500m", "nb_ecoles_500m",
             "nb_parcs_500m", "score_commodites",
+            "distance_tram_proche_m", "distance_gare_proche_m",
+            "zone_inondable",
         ]
         for field in optional_fields:
             val = getattr(appart, field)
             if val is not None:
                 data[field] = val
 
-        # Aligner sur les colonnes du modèle
         X = pd.DataFrame([data])
         X = X.reindex(columns=self._feature_columns, fill_value=np.nan)
 
@@ -125,6 +129,7 @@ if __name__ == "__main__":
         dpe_ordinal=4,
         age_bien=30,
         prix_m2_median_quartier=2500,
+        distance_tram_proche_m=350,
     )
     result = predictor.predict(exemple)
     print(f"Prix prédit : €{result.prix_total_predit:,.0f} (€{result.prix_m2_predit:,.0f}/m²)")
