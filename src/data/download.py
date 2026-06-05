@@ -30,11 +30,18 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 
 # Instances Overpass par ordre de préférence — fallback si timeout/erreur
-# Les deux acceptent les requêtes POST form-encoded : data=<query>
+# Les deux exigent POST form-encoded + User-Agent (overpass-api.de bloque sans UA depuis 04/2026)
 OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
 ]
+
+# Headers communs pour toutes les requêtes Overpass
+OVERPASS_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "immo-dvf-prediction/1.0 (https://github.com/PierreMrt/immo-dvf-prediction)",
+    "Referer": "https://github.com/PierreMrt/immo-dvf-prediction",
+}
 
 # Contours IRIS via WFS data.geopf.fr (endpoint public, sans clé)
 IRIS_WFS_URL = (
@@ -107,14 +114,13 @@ def _download_stream(url: str, dest: Path, timeout: int = 600) -> None:
 
 def _overpass_post(url: str, query: str, timeout: int) -> requests.Response:
     """
-    Envoyer une requête Overpass en POST form-encoded.
-    Les deux instances (kumi.systems et overpass-api.de) exigent ce format.
-    GET avec params= encode la query dans l'URL → 406 sur overpass-api.de.
+    Envoyer une requête Overpass en POST form-encoded avec User-Agent.
+    overpass-api.de bloque les requêtes sans User-Agent depuis avril 2026 (→ 406).
     """
     return requests.post(
         url,
         data={"data": query},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers=OVERPASS_HEADERS,
         timeout=timeout,
     )
 
@@ -166,7 +172,6 @@ def _overpass_raw_with_fallback(query: str, timeout: int = 40) -> list[dict]:
     """
     Exécuter une requête Overpass brute (query complète) en POST avec fallback d'instance.
     Utilisé pour les requêtes ponctuelles (ex : gares SNCF).
-    POST form-encoded requis — GET provoque un 406 sur overpass-api.de.
     """
     for overpass_url in OVERPASS_URLS:
         try:
@@ -390,7 +395,7 @@ def download_arrets_transport() -> None:
 
     - Tram : dataset GTFS stops Irigo (tous les stops, sans filtre route_type absent du dataset)
     - Gare : nœud OSM railway=station dans la bbox élargie couvrant Saint-Laud (lon ~-0.5526)
-      Envoi en POST form-encoded — fallback automatique sur overpass-api.de si kumi.systems timeout.
+      POST form-encoded + User-Agent — fallback automatique sur overpass-api.de si kumi.systems timeout.
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
     if dest.exists():
@@ -441,7 +446,7 @@ def download_arrets_transport() -> None:
 
     logger.info(f"  ✓ {tram_count} arrêts tram")
 
-    # --- Gare SNCF via Overpass POST (avec fallback d'instance) ---
+    # --- Gare SNCF via Overpass POST + User-Agent (avec fallback d'instance) ---
     logger.info("Téléchargement gares SNCF (Overpass)...")
     try:
         elements = _overpass_raw_with_fallback(GARE_OVERPASS_QUERY, timeout=40)
