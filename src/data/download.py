@@ -9,7 +9,7 @@ Sources :
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
 - Contours IRIS : IGN via WFS data.geopf.fr (STATISTICALUNITS.IRISGE:iris_ge)
 - Arrêts tram/gare : data.angers.fr (GTFS stops Irigo) + OSM (gare SNCF)
-- Zones inondables PPRI : Géorisques /api/v1/gaspar/azi (rayon + latlon)
+- Zones inondables PPRI : Géorisques /api/v1/gaspar/azi (rayon + latlon, max ~20 km)
 """
 
 import gzip
@@ -52,10 +52,10 @@ GARE_OVERPASS_QUERY = (
 )
 
 # PPRI — Atlas des Zones Inondables via Géorisques /api/v1/gaspar/azi
-# Paramètres : rayon (mètres) + latlon (lon,lat) — centre Angers
+# Paramètres : rayon (mètres, max ~20 000) + latlon (lon,lat) — centre Angers
 PPRI_GASPAR_URL = "https://www.georisques.gouv.fr/api/v1/gaspar/azi"
 PPRI_CENTER_LATLON = "-0.556,47.478"  # lon,lat centre Angers
-PPRI_RAYON = 25_000  # 25 km autour d'Angers
+PPRI_RAYON = 20_000  # 20 km (limite empirique de l'API)
 
 # Bbox zone Angers (~20km autour) : (lat_min, lon_min, lat_max, lon_max)
 BBOX_ANGERS = (47.40, -0.65, 47.55, -0.45)
@@ -438,7 +438,7 @@ def download_ppri() -> None:
     Télécharger les zones inondables PPRI via Géorisques /api/v1/gaspar/azi.
     Sauvegarde : data/raw/ppri/zones_inondables_49.json
 
-    Paramètres : rayon (mètres) + latlon (lon,lat) autour du centre d'Angers.
+    Paramètres : rayon (mètres, max empirique ~20 000) + latlon (lon,lat) autour du centre d'Angers.
     L'API retourne les AZI impactant des communes dans ce rayon, avec code_insee.
     Pagination complète jusqu'à épuisement des pages.
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
@@ -449,7 +449,7 @@ def download_ppri() -> None:
         return
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("Téléchargement zones inondables PPRI (Angers, rayon 25 km)...")
+    logger.info("Téléchargement zones inondables PPRI (Angers, rayon 20 km)...")
 
     all_records: list[dict] = []
     page = 1
