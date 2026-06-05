@@ -17,6 +17,22 @@ EPSG_WGS84 = 4326
 EPSG_LAMBERT = 2154
 
 
+def _find_iris_columns(iris_geo: gpd.GeoDataFrame) -> tuple[str, str]:
+    """
+    Retrouver les colonnes code_iris et nom_iris quelle que soit leur casse.
+    Le WFS data.geopf.fr peut retourner CODE_IRIS ou code_iris selon les versions.
+    """
+    cols_lower = {c.lower(): c for c in iris_geo.columns}
+    col_code = cols_lower.get("code_iris")
+    col_nom = cols_lower.get("nom_iris")
+    if col_code is None or col_nom is None:
+        raise KeyError(
+            f"Colonnes code_iris / nom_iris introuvables dans le GeoJSON IRIS. "
+            f"Colonnes disponibles : {list(iris_geo.columns)}"
+        )
+    return col_code, col_nom
+
+
 def join_iris(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Jointure IRIS...")
     iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
@@ -25,17 +41,19 @@ def join_iris(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     iris_geo = gpd.read_file(iris_path)
+    col_code, col_nom = _find_iris_columns(iris_geo)
+
     gdf = gpd.GeoDataFrame(
         df,
         geometry=gpd.points_from_xy(df["longitude"], df["latitude"]),
         crs=EPSG_WGS84,
     )
     joined = gpd.sjoin(
-        gdf, iris_geo[["CODE_IRIS", "NOM_IRIS", "geometry"]], how="left", predicate="within"
+        gdf, iris_geo[[col_code, col_nom, "geometry"]], how="left", predicate="within"
     )
     df = df.copy()
-    df["code_iris"] = joined["CODE_IRIS"].values
-    df["nom_iris"] = joined["NOM_IRIS"].values
+    df["code_iris"] = joined[col_code].values
+    df["nom_iris"] = joined[col_nom].values
     logger.info(f"✓ IRIS assigné ({df['code_iris'].notna().sum():,} / {len(df):,})")
     return df
 
