@@ -3,12 +3,12 @@ Téléchargement des données DVF, DPE, équipements OSM, contours IRIS,
 arrêts de transport (tram/gare) et zones inondables PPRI.
 
 Sources :
-- DVF géolocalisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
+- DVF géolisées : https://files.data.gouv.fr/geo-dvf/latest/csv/{annee}/departements/{dep}.csv.gz
   Disponibles avec un décalage : l'année N est publiée courant N+1.
 - DPE (depuis juil. 2021) : https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant
 - Équipements OSM : Overpass API kumi.systems (une requête par filtre + retry)
-- Contours IRIS : IGN via data.gouv.fr (GeoJSON du département)
-- Arrêts tram/gare : data.angers.fr (tram) + OSM (gare SNCF)
+- Contours IRIS : IGN via Géoplateforme WFS (ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge)
+- Arrêts tram/gare : data.angers.fr (GTFS stops tram) + OSM (gare SNCF)
 - Zones inondables PPRI : data.gouv.fr (GeoJSON Maine-et-Loire)
 """
 
@@ -29,31 +29,21 @@ DPE_API_URL = "https://data.ademe.fr/data-fair/api/v1/datasets/dpe03existant/lin
 DPE_BATCH_SIZE = 10_000
 OVERPASS_URL = "https://overpass.kumi.systems/api/interpreter"
 
-IRIS_BASE_URL = (
-    "https://wxs.ign.fr/1yhlj2ehpqf3q6dt6a2y7b64/telechargement/inspire/"
-    "CONTOURS-IRIS-2023-01-01$CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01/"
-    "file/CONTOURS-IRIS_3-0__SHP__FRA_2023-01-01.7z"
-)
-IRIS_GEOJSON_URL = (
-    "https://data.geopf.fr/wfs/ows"
-    "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-    "&TYPENAMES=BDTOPO_V3:zone_d_activite_ou_d_interet"
-    "&outputFormat=application/json"
-)
+# Contours IRIS via Géoplateforme IGN WFS
+# Typename correct : ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge
 IRIS_API_URL = (
     "https://data.geopf.fr/wfs/ows"
     "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-    "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
+    "&TYPENAMES=ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge"
     "&outputFormat=application/json"
     "&CQL_FILTER=insee_dep='{dep}'"
-    "&count=5000"
+    "&count=1000"
 )
 
-# Arrêts tram Angers via data.angers.fr (API ODS)
-TRAM_STOPS_URL = (
-    "https://data.angers.fr/api/explore/v2.1/catalog/datasets/"
-    "am_arrets_lignes/records?limit=100&where=mode_transport%3D'TRAM'"
-)
+# Arrêts tram Angers via data.angers.fr
+# Dataset : horaires-theoriques-et-arrets-du-reseau-irigo-gtfs (fichier stops GTFS)
+TRAM_DATASET_ID = "horaires-theoriques-et-arrets-du-reseau-irigo-gtfs"
+
 # Gare Saint-Serge via Overpass (nœud OSM fixe)
 GARE_OVERPASS_QUERY = (
     "[out:json][timeout:30];\n"
@@ -155,7 +145,7 @@ def _overpass_query_with_retry(
 
 def download_dvf_geolocalisees(years: list[int] | None = None) -> None:
     """
-    Télécharger les DVF géolocalisées pour le département configuré.
+    Télécharger les DVF géolisées pour le département configuré.
     Les fichiers .csv.gz sont décompressés automatiquement en .csv.
     L'année N est généralement disponible courant N+1.
     """
@@ -305,7 +295,8 @@ def download_iris(dep: str | None = None) -> None:
     Télécharger les contours IRIS du département via l'API WFS Géoplateforme IGN.
     Sauvegarde : data/raw/iris/contours_iris_{dep}.geojson
 
-    L'API retourne un GeoJSON paginé (paramètre `startIndex`).
+    Typename WFS : ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge
+    L'API retourne un GeoJSON paginé (paramètre startIndex).
     Si l'API échoue, un WARNING est émis sans bloquer le pipeline.
     """
     dep = dep or settings.department_code
@@ -321,7 +312,7 @@ def download_iris(dep: str | None = None) -> None:
     base_url = (
         "https://data.geopf.fr/wfs/ows"
         "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
-        "&TYPENAMES=ADMINEXPRESS-COG-CARTO.LATEST:iris_ge"
+        "&TYPENAMES=ADMINEXPRESS-COG-CARTO-PE.LATEST:iris_ge"
         "&outputFormat=application/json"
         f"&CQL_FILTER=insee_dep='{dep}'"
         "&count=1000"
@@ -368,7 +359,9 @@ def download_arrets_transport() -> None:
     Télécharger les arrêts tram depuis data.angers.fr et la gare SNCF via Overpass.
     Sauvegarde : data/raw/transport/arrets_transport.parquet
 
-    - Tram : API ODS data.angers.fr, filtre mode_transport=TRAM
+    - Tram : dataset GTFS stops Irigo (horaires-theoriques-et-arrets-du-reseau-irigo-gtfs)
+             filtre sur stop_name contenant des noms de lignes tram (A/B/C)
+             ou sur le champ route_type=0 (tram) si disponible dans le dataset
     - Gare : nœud OSM railway=station dans la bbox Angers
     """
     dest = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
@@ -379,16 +372,16 @@ def download_arrets_transport() -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
 
-    # --- Arrêts tram via data.angers.fr ---
-    logger.info("Téléchargement arrêts tram (data.angers.fr)...")
+    # --- Arrêts tram via data.angers.fr (dataset GTFS stops) ---
+    logger.info("Téléchargement arrêts tram (data.angers.fr - GTFS Irigo)...")
     offset = 0
     limit = 100
+    tram_count = 0
     while True:
         try:
             r = requests.get(
-                "https://data.angers.fr/api/explore/v2.1/catalog/datasets/"
-                "am_arrets_lignes/records",
-                params={"limit": limit, "offset": offset, "where": "mode_transport='TRAM'"},
+                f"https://data.angers.fr/api/explore/v2.1/catalog/datasets/{TRAM_DATASET_ID}/records",
+                params={"limit": limit, "offset": offset, "where": "route_type=0"},
                 timeout=30,
             )
             r.raise_for_status()
@@ -402,22 +395,23 @@ def download_arrets_transport() -> None:
             break
 
         for rec in records:
-            geo = rec.get("geo_point_2d") or {}
-            lat = geo.get("lat") or rec.get("lat")
-            lon = geo.get("lon") or rec.get("lon")
+            geo = rec.get("stop_coordinates") or rec.get("geo_point_2d") or {}
+            lat = geo.get("lat") or rec.get("stop_lat")
+            lon = geo.get("lon") or rec.get("stop_lon")
             if lat and lon:
                 rows.append({
                     "lat": float(lat),
                     "lon": float(lon),
                     "type": "tram",
-                    "nom": rec.get("nom_arret", ""),
+                    "nom": rec.get("stop_name", ""),
                 })
+                tram_count += 1
 
         offset += limit
         if len(records) < limit:
             break
 
-    logger.info(f"  ✓ {sum(1 for r in rows if r['type'] == 'tram')} arrêts tram")
+    logger.info(f"  ✓ {tram_count} arrêts tram")
 
     # --- Gare SNCF via Overpass ---
     logger.info("Téléchargement gares SNCF (Overpass)...")
