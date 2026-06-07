@@ -1,15 +1,15 @@
 """
-Scraping des annonces immobilières via Playwright.
+Scraping des annonces immobilières via Playwright + playwright-stealth.
 
-Playwright lance un vrai navigateur Chromium headless, contournant
-le fingerprinting TLS et les anti-bots (Cloudflare, leboncoin...).
+playwright-stealth masque les propriétés navigator.webdriver détectées
+par leboncoin et autres sites anti-bot.
 
-Dépendances : playwright (pip install playwright && playwright install chromium)
+Dépendances :
+    pip install playwright playwright-stealth
+    playwright install chromium
 """
 
 import re
-
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 from src.utils.logging import logger
 
@@ -23,8 +23,8 @@ def fetch_annonce_text(url: str) -> str:
     """
     Récupérer le contenu textuel brut d'une annonce immobilière.
 
-    Utilise Playwright (Chromium headless) pour contourner les protections
-    anti-bot des sites (Cloudflare, TLS fingerprinting, leboncoin...).
+    Utilise Playwright (Chromium headless) + playwright-stealth pour contourner
+    les protections anti-bot (Cloudflare, navigator.webdriver, leboncoin...).
     Le texte est ensuite passé à l'agent LLM pour extraction structurée.
 
     Args:
@@ -33,6 +33,22 @@ def fetch_annonce_text(url: str) -> str:
     Returns:
         Texte brut de la page (nettoyé), chaîne vide si échec.
     """
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    except ImportError:
+        logger.error(
+            "✗ playwright non installé. Lancer : pip install playwright playwright-stealth && playwright install chromium"
+        )
+        return ""
+
+    try:
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        logger.error(
+            "✗ playwright-stealth non installé. Lancer : pip install playwright-stealth"
+        )
+        return ""
+
     logger.info(f"Scraping annonce : {url}")
     try:
         with sync_playwright() as p:
@@ -46,21 +62,19 @@ def fetch_annonce_text(url: str) -> str:
                 ),
             )
             page = context.new_page()
+            stealth_sync(page)
 
             page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_TIMEOUT)
 
-            # Supprimer les balises inutiles avant extraction
             for tag in _TAGS_TO_REMOVE:
-                page.evaluate(f"""
-                    document.querySelectorAll('{tag}').forEach(el => el.remove())
-                """)
+                page.evaluate(f"document.querySelectorAll('{tag}').forEach(el => el.remove())")
 
             text = page.inner_text("body")
             browser.close()
 
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
-            logger.warning("Texte vide, retour de features nulles")
+            logger.warning("Texte vide après scraping")
             return ""
 
         logger.info(f"✓ Texte extrait ({len(text)} caractères)")

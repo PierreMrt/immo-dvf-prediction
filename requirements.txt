@@ -21,6 +21,7 @@ openai
 
 # Scraping
 playwright
+playwright-stealth
 
 # Utils
 python-dotenv
