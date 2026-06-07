@@ -24,10 +24,12 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     - surface_par_piece, copro_petite/grande
     - dpe_ordinal, dpe_bonus, dpe_malus (depuis etiquette_dpe)
     - age_bien (depuis annee_construction)
-    - prix_m2_median_quartier, nb_ventes_quartier, prix_m2_vs_quartier
     - score_commodites
-    - distance_tram_proche_m, distance_gare_proche_m (depuis join_transports)
-    - zone_inondable (depuis join_ppri)
+    - distance_tram_proche_m, distance_gare_proche_m
+    - zone_inondable
+
+    Note : prix_m2_median_quartier et nb_ventes_quartier sont calculés
+    dans split.py sur le train set uniquement pour éviter le data leakage.
     """
     df = df.copy()
 
@@ -52,27 +54,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["age_bien"] = np.nan
 
-    if "code_iris" in df.columns:
-        quartier_stats = (
-            df.groupby("code_iris")["prix_m2"]
-            .agg(prix_m2_median_quartier="median", nb_ventes_quartier="count")
-            .reset_index()
-        )
-        df = df.merge(quartier_stats, on="code_iris", how="left")
-        df["prix_m2_vs_quartier"] = df["prix_m2"] / df["prix_m2_median_quartier"]
-
     commodite_cols = ["nb_commerces_500m", "nb_restaurants_500m", "nb_ecoles_500m", "nb_parcs_500m"]
     available = [c for c in commodite_cols if c in df.columns]
     if available:
         df["score_commodites"] = df[available].sum(axis=1)
 
-    # distance_tram_proche_m et distance_gare_proche_m sont déjà calculées
-    # dans join_transports() — on vérifie simplement leur présence
     for col in ["distance_tram_proche_m", "distance_gare_proche_m"]:
         if col not in df.columns:
             df[col] = np.nan
 
-    # zone_inondable est déjà calculée dans join_ppri()
     if "zone_inondable" not in df.columns:
         df["zone_inondable"] = np.nan
 

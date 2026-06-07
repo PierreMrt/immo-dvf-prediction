@@ -219,9 +219,7 @@ def _resolve_code_iris(
     iris_geo = gpd.read_file(iris_path)
 
     # Étape 1 : sjoin sur les coordonnées GPS
-    point = gpd.GeoDataFrame(
-        [{"geometry": Point(lon, lat)}], crs=4326
-    )
+    point = gpd.GeoDataFrame([{"geometry": Point(lon, lat)}], crs=4326)
     joined = gpd.sjoin(point, iris_geo[["code_iris", "nom_iris", "geometry"]], how="left", predicate="within")
     code_iris = joined["code_iris"].iloc[0] if not joined.empty else None
     if pd.notna(code_iris):
@@ -294,23 +292,21 @@ def _enrich_with_spatial_features(
         in_flood_zone = int(ppri.geometry.contains(pt_lambert).any())
         object.__setattr__(appart, "zone_inondable", in_flood_zone)
 
-    # --- Stats quartier IRIS ---
-    features_path = DATA_PROCESSED_DIR / "dvf_angers_features.parquet"
-    if features_path.exists():
+    # --- Stats quartier IRIS (depuis iris_stats.parquet produit par split.py) ---
+    iris_stats_path = DATA_PROCESSED_DIR / "train_test_split" / "iris_stats.parquet"
+    if iris_stats_path.exists():
         code_iris = _resolve_code_iris(lat, lon, quartier)
         if code_iris:
-            cols = pd.read_parquet(features_path, columns=[]).columns.tolist()
-            if "code_iris" in cols:
-                df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
-                iris_stats = df_feat[df_feat["code_iris"] == code_iris]["prix_m2"]
-                if not iris_stats.empty:
-                    object.__setattr__(appart, "prix_m2_median_quartier", float(iris_stats.median()))
-                    object.__setattr__(appart, "nb_ventes_quartier", int(len(iris_stats)))
-                    logger.info(
-                        f"✓ Stats IRIS : médiane={iris_stats.median():.0f} €/m², "
-                        f"n={len(iris_stats)} ventes ({code_iris})"
-                    )
-            else:
-                logger.warning("⚠ code_iris absent du dataset features — relancer make data-join && data-features")
+            iris_stats = pd.read_parquet(iris_stats_path)
+            row = iris_stats[iris_stats["code_iris"] == code_iris]
+            if not row.empty:
+                object.__setattr__(appart, "prix_m2_median_quartier", float(row["prix_m2_median_quartier"].iloc[0]))
+                object.__setattr__(appart, "nb_ventes_quartier", int(row["nb_ventes_quartier"].iloc[0]))
+                logger.info(
+                    f"✓ Stats IRIS : médiane={row['prix_m2_median_quartier'].iloc[0]:.0f} €/m², "
+                    f"n={row['nb_ventes_quartier'].iloc[0]} ventes ({code_iris})"
+                )
+    else:
+        logger.warning("⚠ iris_stats.parquet introuvable — relancer make data-features && make train")
 
     return appart
