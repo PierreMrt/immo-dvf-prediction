@@ -11,11 +11,16 @@ from src.data.load import load_dvf_raw
 from src.utils.config import DATA_PROCESSED_DIR, settings
 from src.utils.logging import logger
 
-# Seuils de filtrage outliers (prix et surface)
+# Seuils de filtrage outliers (prix total et surface)
 PRIX_MIN = 10_000
 PRIX_MAX = 2_000_000
 SURFACE_MIN = 9
 SURFACE_MAX = 500
+
+# Seuils de filtrage outliers sur le prix au m²
+# Angers : marché entre ~1 000 et ~8 000 €/m² (hors biens atypiques)
+PRIX_M2_MIN = 1_000
+PRIX_M2_MAX = 8_000
 
 # Abréviations DVF → forme longue (ordre important : plus long en premier)
 _ABREV_DVF = [
@@ -125,7 +130,7 @@ def clean_dvf_angers() -> pd.DataFrame:
         & (df["valeur_fonciere"].between(PRIX_MIN, PRIX_MAX))
     ].reset_index(drop=True)
 
-    logger.info(f"Après filtrage : {len(df):,} ventes")
+    logger.info(f"Après filtrage initial : {len(df):,} ventes")
 
     # Renommer les colonnes pour la clarté
     df = df.rename(
@@ -142,6 +147,11 @@ def clean_dvf_angers() -> pd.DataFrame:
     df["prix_m2"] = df["prix_vente"] / df["surface_m2"]
     df["mois_vente"] = df["date_vente"].dt.month
     df["annee_vente"] = df["date_vente"].dt.year
+
+    # Filtre outliers prix au m² (après calcul)
+    avant = len(df)
+    df = df[df["prix_m2"].between(PRIX_M2_MIN, PRIX_M2_MAX)].reset_index(drop=True)
+    logger.info(f"Filtre prix/m² [{PRIX_M2_MIN}–{PRIX_M2_MAX} €/m²] : {avant - len(df):,} outliers supprimés → {len(df):,} ventes conservées")
 
     # Adresse normalisée pour jointure DPE
     df["adresse_norm"] = normalize_adresse(
