@@ -1,8 +1,8 @@
 """
 Scraping des annonces immobilières via Playwright + playwright-stealth.
 
-playwright-stealth masque les propriétés navigator.webdriver détectées
-par leboncoin et autres sites anti-bot.
+playwright-stealth v2 masque navigator.webdriver et autres empreintes
+détectées par leboncoin/Cloudflare via la classe Stealth.
 
 Dépendances :
     pip install playwright playwright-stealth
@@ -13,9 +13,7 @@ import re
 
 from src.utils.logging import logger
 
-# Délai max (ms) pour le chargement de la page
 _PAGE_TIMEOUT = 30_000
-# Sélecteurs à supprimer avant extraction du texte
 _TAGS_TO_REMOVE = ["script", "style", "nav", "footer", "header"]
 
 
@@ -23,7 +21,7 @@ def fetch_annonce_text(url: str) -> str:
     """
     Récupérer le contenu textuel brut d'une annonce immobilière.
 
-    Utilise Playwright (Chromium headless) + playwright-stealth pour contourner
+    Utilise Playwright (Chromium headless) + playwright-stealth v2 pour contourner
     les protections anti-bot (Cloudflare, navigator.webdriver, leboncoin...).
     Le texte est ensuite passé à l'agent LLM pour extraction structurée.
 
@@ -36,22 +34,20 @@ def fetch_annonce_text(url: str) -> str:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     except ImportError:
-        logger.error(
-            "✗ playwright non installé. Lancer : pip install playwright playwright-stealth && playwright install chromium"
-        )
+        logger.error("✗ playwright non installé. Lancer : pip install playwright && playwright install chromium")
         return ""
 
     try:
-        from playwright_stealth import stealth_sync
+        from playwright_stealth import Stealth
     except ImportError:
-        logger.error(
-            "✗ playwright-stealth non installé. Lancer : pip install playwright-stealth"
-        )
+        logger.error("✗ playwright-stealth non installé. Lancer : pip install playwright-stealth")
         return ""
 
     logger.info(f"Scraping annonce : {url}")
+    stealth = Stealth(navigator_languages_override=("fr-FR", "fr"))
+
     try:
-        with sync_playwright() as p:
+        with stealth.use_sync(sync_playwright()) as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
                 locale="fr-FR",
@@ -62,8 +58,6 @@ def fetch_annonce_text(url: str) -> str:
                 ),
             )
             page = context.new_page()
-            stealth_sync(page)
-
             page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_TIMEOUT)
 
             for tag in _TAGS_TO_REMOVE:
