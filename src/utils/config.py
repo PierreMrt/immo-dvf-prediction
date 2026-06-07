@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     # API Keys
     openrouter_api_key: Optional[str] = Field(None)
 
-    # LLM
-    llm_model: str = Field("mistralai/mistral-7b-instruct")
+    # LLM — modèle gratuit OpenRouter (mistral-7b-instruct supprimé en 2026)
+    llm_model: str = Field("meta-llama/llama-3.3-70b-instruct:free")
     llm_base_url: str = Field("https://openrouter.ai/api/v1")
 
     model_config = {
