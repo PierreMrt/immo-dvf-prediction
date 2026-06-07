@@ -9,6 +9,7 @@ from datetime import datetime
 from difflib import get_close_matches
 from typing import Optional
 
+import pandas as pd
 import requests
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -259,7 +260,6 @@ def _enrich_with_spatial_features(
     Returns:
         AppartementInput enrichi (nouvelles valeurs si fichiers disponibles)
     """
-    import pandas as pd
     import geopandas as gpd
     from shapely.geometry import Point
     from src.utils.config import DATA_RAW_DIR, DATA_PROCESSED_DIR
@@ -299,8 +299,6 @@ def _enrich_with_spatial_features(
     if features_path.exists():
         code_iris = _resolve_code_iris(lat, lon, quartier)
         if code_iris:
-            df_feat = pd.read_parquet(features_path, columns=["prix_m2"])
-            # Recharger avec code_iris uniquement si la colonne existe
             cols = pd.read_parquet(features_path, columns=[]).columns.tolist()
             if "code_iris" in cols:
                 df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
