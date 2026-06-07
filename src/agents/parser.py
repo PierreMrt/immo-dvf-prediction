@@ -4,6 +4,7 @@ Utilise le client OpenAI compatible avec OpenRouter pour parser le texte brut.
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -54,6 +55,14 @@ Réponds UNIQUEMENT avec un JSON valide contenant les champs suivants
     "charges_copro": <float|null>
 }}
 """
+
+
+def _extract_json(raw: str) -> str:
+    """Extraire le JSON brut depuis une réponse LLM (retire les balises ```json ... ```)."""
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
 
 
 def geocode_adresse(adresse: str) -> tuple[float, float] | None:
@@ -127,13 +136,14 @@ class AnnonceParser:
             ],
         )
 
+        raw = response.choices[0].message.content or ""
         try:
-            data = json.loads(response.choices[0].message.content)
+            data = json.loads(_extract_json(raw))
             features = AnnonceFeatures(**data)
             logger.info(f"✓ Caractéristiques extraites : {features}")
             return features
         except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"✗ Erreur parsing LLM : {e}")
+            logger.error(f"✗ Erreur parsing LLM : {e} | réponse brute : {raw[:200]!r}")
             return AnnonceFeatures()
 
     def to_appart_input(self, features: AnnonceFeatures) -> AppartementInput:
