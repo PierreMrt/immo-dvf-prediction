@@ -6,6 +6,7 @@ Utilise le client OpenAI compatible avec OpenRouter pour parser le texte brut.
 import json
 import re
 from datetime import datetime
+from difflib import get_close_matches
 from typing import Optional
 
 import requests
@@ -178,34 +179,87 @@ class AnnonceParser:
             age_bien=age_bien,
         )
 
-        # Géocodage → features spatiales
         adresse = features.adresse or features.quartier
         if adresse:
             coords = geocode_adresse(f"{adresse}, Angers")
             if coords:
                 lat, lon = coords
-                appart = _enrich_with_spatial_features(appart, lat, lon)
+                appart = _enrich_with_spatial_features(appart, lat, lon, features.quartier)
 
         return appart
+
+
+def _resolve_code_iris(
+    lat: float,
+    lon: float,
+    quartier: str | None,
+) -> str | None:
+    """
+    Résoudre le code_iris d'un bien en deux étapes :
+    1. sjoin point GPS × polygones IRIS (prioritaire)
+    2. Fuzzy match sur nom_iris si le sjoin échoue et qu'un quartier est fourni
+
+    Args:
+        lat: Latitude WGS-84
+        lon: Longitude WGS-84
+        quartier: Nom de quartier extrait de l'annonce (optionnel)
+
+    Returns:
+        code_iris ou None
+    """
+    import geopandas as gpd
+    from shapely.geometry import Point
+    from src.utils.config import DATA_RAW_DIR
+
+    iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
+    if not iris_path.exists():
+        return None
+
+    iris_geo = gpd.read_file(iris_path)
+
+    # Étape 1 : sjoin sur les coordonnées GPS
+    point = gpd.GeoDataFrame(
+        [{"geometry": Point(lon, lat)}], crs=4326
+    )
+    joined = gpd.sjoin(point, iris_geo[["code_iris", "nom_iris", "geometry"]], how="left", predicate="within")
+    code_iris = joined["code_iris"].iloc[0] if not joined.empty else None
+    if pd.notna(code_iris):
+        logger.info(f"✓ IRIS résolu par géocodage : {code_iris} ({joined['nom_iris'].iloc[0]})")
+        return str(code_iris)
+
+    # Étape 2 : fuzzy match sur nom_iris
+    if quartier:
+        noms = iris_geo["nom_iris"].dropna().tolist()
+        matches = get_close_matches(quartier, noms, n=1, cutoff=0.5)
+        if matches:
+            row = iris_geo[iris_geo["nom_iris"] == matches[0]].iloc[0]
+            logger.info(f"✓ IRIS résolu par fuzzy match : '{quartier}' → '{matches[0]}' ({row['code_iris']})")
+            return str(row["code_iris"])
+        logger.warning(f"⚠ Fuzzy match IRIS sans résultat pour : '{quartier}'")
+
+    return None
 
 
 def _enrich_with_spatial_features(
     appart: AppartementInput,
     lat: float,
     lon: float,
+    quartier: str | None = None,
 ) -> AppartementInput:
     """
     Enrichir un AppartementInput avec les features spatiales
-    calculées depuis les fichiers précalculés (transport, PPRI, stats IRIS).
+    calculées depuis les fichiers précalculés (transport, PPRI, IRIS).
 
     Args:
         appart: Input à enrichir
         lat: Latitude WGS-84
         lon: Longitude WGS-84
+        quartier: Nom de quartier extrait de l'annonce (fallback IRIS)
 
     Returns:
         AppartementInput enrichi (nouvelles valeurs si fichiers disponibles)
     """
+    import pandas as pd
     import geopandas as gpd
     from shapely.geometry import Point
     from src.utils.config import DATA_RAW_DIR, DATA_PROCESSED_DIR
@@ -217,7 +271,6 @@ def _enrich_with_spatial_features(
     # --- Distance tram et gare ---
     transport_path = DATA_RAW_DIR / "transport" / "arrets_transport.parquet"
     if transport_path.exists():
-        import pandas as pd
         transport = pd.read_parquet(transport_path)
         gdf_transport = gpd.GeoDataFrame(
             transport,
@@ -241,23 +294,25 @@ def _enrich_with_spatial_features(
         in_flood_zone = int(ppri.geometry.contains(pt_lambert).any())
         object.__setattr__(appart, "zone_inondable", in_flood_zone)
 
-    # --- Stats quartier depuis le dataset features précalculé ---
+    # --- Stats quartier IRIS ---
     features_path = DATA_PROCESSED_DIR / "dvf_angers_features.parquet"
-    iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
-    if features_path.exists() and iris_path.exists():
-        import pandas as pd
-        iris_geo = gpd.read_file(iris_path)
-        gdf_pt = gpd.GeoDataFrame(
-            [{"geometry": point_wgs84}], crs=EPSG_WGS84
-        )
-        joined = gpd.sjoin(gdf_pt, iris_geo[["code_iris", "geometry"]], how="left", predicate="within")
-        code_iris = joined["code_iris"].iloc[0] if not joined.empty else None
-
+    if features_path.exists():
+        code_iris = _resolve_code_iris(lat, lon, quartier)
         if code_iris:
-            df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
-            iris_stats = df_feat[df_feat["code_iris"] == code_iris]["prix_m2"]
-            if not iris_stats.empty:
-                object.__setattr__(appart, "prix_m2_median_quartier", float(iris_stats.median()))
-                object.__setattr__(appart, "nb_ventes_quartier", int(len(iris_stats)))
+            df_feat = pd.read_parquet(features_path, columns=["prix_m2"])
+            # Recharger avec code_iris uniquement si la colonne existe
+            cols = pd.read_parquet(features_path, columns=[]).columns.tolist()
+            if "code_iris" in cols:
+                df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
+                iris_stats = df_feat[df_feat["code_iris"] == code_iris]["prix_m2"]
+                if not iris_stats.empty:
+                    object.__setattr__(appart, "prix_m2_median_quartier", float(iris_stats.median()))
+                    object.__setattr__(appart, "nb_ventes_quartier", int(len(iris_stats)))
+                    logger.info(
+                        f"✓ Stats IRIS : médiane={iris_stats.median():.0f} €/m², "
+                        f"n={len(iris_stats)} ventes ({code_iris})"
+                    )
+            else:
+                logger.warning("⚠ code_iris absent du dataset features — relancer make data-join && data-features")
 
     return appart
