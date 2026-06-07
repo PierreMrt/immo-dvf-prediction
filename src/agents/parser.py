@@ -250,8 +250,8 @@ def _enrich_with_spatial_features(
         gdf_pt = gpd.GeoDataFrame(
             [{"geometry": point_wgs84}], crs=EPSG_WGS84
         )
-        joined = gpd.sjoin(gdf_pt, iris_geo[["CODE_IRIS", "geometry"]], how="left", predicate="within")
-        code_iris = joined["CODE_IRIS"].iloc[0] if not joined.empty else None
+        joined = gpd.sjoin(gdf_pt, iris_geo[["code_iris", "geometry"]], how="left", predicate="within")
+        code_iris = joined["code_iris"].iloc[0] if not joined.empty else None
 
         if code_iris:
             df_feat = pd.read_parquet(features_path, columns=["code_iris", "prix_m2"])
