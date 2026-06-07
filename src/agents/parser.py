@@ -20,6 +20,7 @@ from src.utils.config import settings
 from src.utils.logging import logger
 
 BAN_GEOCODE_URL = "https://api-adresse.data.gouv.fr/search/"
+BAN_SCORE_MIN = 0.65  # seuil en dessous duquel le géocodage est rejeté
 
 
 class AnnonceFeatures(BaseModel):
@@ -69,13 +70,14 @@ def _extract_json(raw: str) -> str:
 
 def geocode_adresse(adresse: str) -> tuple[float, float] | None:
     """
-    Géocoder une adresse via l'API Adresse data.gouv.fr (BAN).
+    Géocoder une adresse de rue via l'API BAN.
+    Ne pas appeler avec un simple nom de quartier (score trop faible).
 
     Args:
-        adresse: Adresse textuelle (ex: "12 rue de la Paix, Angers")
+        adresse: Adresse de rue complète (ex: "12 rue de la Paix, Angers")
 
     Returns:
-        (latitude, longitude) ou None si échec
+        (latitude, longitude) ou None si score < BAN_SCORE_MIN
     """
     try:
         r = requests.get(
@@ -91,8 +93,8 @@ def geocode_adresse(adresse: str) -> tuple[float, float] | None:
         coords = features[0]["geometry"]["coordinates"]
         lon, lat = coords[0], coords[1]
         score = features[0]["properties"].get("score", 0)
-        if score < 0.5:
-            logger.warning(f"⚠ Géocodage de faible confiance (score={score:.2f}) pour : {adresse}")
+        if score < BAN_SCORE_MIN:
+            logger.warning(f"⚠ Géocodage rejeté (score={score:.2f} < {BAN_SCORE_MIN}) pour : {adresse}")
             return None
         logger.info(f"✓ Géocodage : {adresse} → ({lat:.5f}, {lon:.5f}) score={score:.2f}")
         return lat, lon
@@ -151,7 +153,11 @@ class AnnonceParser:
     def to_appart_input(self, features: AnnonceFeatures) -> AppartementInput:
         """
         Convertir les AnnonceFeatures en AppartementInput pour la prédiction.
-        Inclut le géocodage de l'adresse pour alimenter les features spatiales.
+
+        Stratégie de géocodage :
+        - Si adresse de rue disponible → géocodage BAN (score >= 0.65 requis)
+          puis enrichissement spatial (transport, PPRI, IRIS par GPS)
+        - Si seulement un quartier → fuzzy match IRIS direct (pas de GPS)
 
         Args:
             features: Caractéristiques extraites de l'annonce
@@ -180,12 +186,18 @@ class AnnonceParser:
             age_bien=age_bien,
         )
 
-        adresse = features.adresse or features.quartier
-        if adresse:
-            coords = geocode_adresse(f"{adresse}, Angers")
+        if features.adresse:
+            # Adresse de rue : géocodage BAN + enrichissement spatial complet
+            coords = geocode_adresse(f"{features.adresse}, Angers")
             if coords:
                 lat, lon = coords
                 appart = _enrich_with_spatial_features(appart, lat, lon, features.quartier)
+            elif features.quartier:
+                # Géocodage échoué : fallback fuzzy IRIS sur le quartier
+                appart = _enrich_iris_from_quartier(appart, features.quartier)
+        elif features.quartier:
+            # Pas d'adresse de rue : fuzzy match IRIS directement, sans géocodage
+            appart = _enrich_iris_from_quartier(appart, features.quartier)
 
         return appart
 
@@ -193,20 +205,11 @@ class AnnonceParser:
 def _resolve_code_iris(
     lat: float,
     lon: float,
-    quartier: str | None,
+    quartier: str | None = None,
 ) -> str | None:
     """
-    Résoudre le code_iris d'un bien en deux étapes :
-    1. sjoin point GPS × polygones IRIS (prioritaire)
-    2. Fuzzy match sur nom_iris si le sjoin échoue et qu'un quartier est fourni
-
-    Args:
-        lat: Latitude WGS-84
-        lon: Longitude WGS-84
-        quartier: Nom de quartier extrait de l'annonce (optionnel)
-
-    Returns:
-        code_iris ou None
+    Résoudre le code_iris d'un bien par sjoin GPS sur les polygones IRIS.
+    Fuzzy match en fallback si le sjoin ne donne rien et qu'un quartier est fourni.
     """
     import geopandas as gpd
     from shapely.geometry import Point
@@ -218,25 +221,84 @@ def _resolve_code_iris(
 
     iris_geo = gpd.read_file(iris_path)
 
-    # Étape 1 : sjoin sur les coordonnées GPS
+    # Étape 1 : sjoin GPS
     point = gpd.GeoDataFrame([{"geometry": Point(lon, lat)}], crs=4326)
     joined = gpd.sjoin(point, iris_geo[["code_iris", "nom_iris", "geometry"]], how="left", predicate="within")
     code_iris = joined["code_iris"].iloc[0] if not joined.empty else None
     if pd.notna(code_iris):
-        logger.info(f"✓ IRIS résolu par géocodage : {code_iris} ({joined['nom_iris'].iloc[0]})")
+        logger.info(f"✓ IRIS résolu par GPS : {code_iris} ({joined['nom_iris'].iloc[0]})")
         return str(code_iris)
 
-    # Étape 2 : fuzzy match sur nom_iris
+    # Étape 2 : fuzzy match
     if quartier:
-        noms = iris_geo["nom_iris"].dropna().tolist()
-        matches = get_close_matches(quartier, noms, n=1, cutoff=0.5)
-        if matches:
-            row = iris_geo[iris_geo["nom_iris"] == matches[0]].iloc[0]
-            logger.info(f"✓ IRIS résolu par fuzzy match : '{quartier}' → '{matches[0]}' ({row['code_iris']})")
-            return str(row["code_iris"])
-        logger.warning(f"⚠ Fuzzy match IRIS sans résultat pour : '{quartier}'")
+        return _fuzzy_match_iris(quartier, iris_geo)
 
     return None
+
+
+def _fuzzy_match_iris(quartier: str, iris_geo=None) -> str | None:
+    """
+    Résoudre un code_iris par fuzzy match sur le nom de quartier.
+
+    Args:
+        quartier: Nom de quartier extrait de l'annonce
+        iris_geo: GeoDataFrame IRIS déjà chargé (optionnel, recharge si None)
+
+    Returns:
+        code_iris ou None
+    """
+    import geopandas as gpd
+    from src.utils.config import DATA_RAW_DIR
+
+    if iris_geo is None:
+        iris_path = DATA_RAW_DIR / "iris" / "contours_iris_49.geojson"
+        if not iris_path.exists():
+            return None
+        iris_geo = gpd.read_file(iris_path)
+
+    # Nettoyer le quartier : retirer la ville et le code postal en fin
+    quartier_clean = re.sub(r",?\s*(Angers|\d{5}).*$", "", quartier, flags=re.IGNORECASE).strip()
+
+    noms = iris_geo["nom_iris"].dropna().tolist()
+    matches = get_close_matches(quartier_clean, noms, n=1, cutoff=0.4)
+    if matches:
+        row = iris_geo[iris_geo["nom_iris"] == matches[0]].iloc[0]
+        logger.info(f"✓ IRIS résolu par fuzzy match : '{quartier_clean}' → '{matches[0]}' ({row['code_iris']})")
+        return str(row["code_iris"])
+
+    logger.warning(f"⚠ Fuzzy match IRIS sans résultat pour : '{quartier_clean}'")
+    return None
+
+
+def _enrich_iris_from_quartier(
+    appart: AppartementInput,
+    quartier: str,
+) -> AppartementInput:
+    """
+    Enrichir uniquement les stats IRIS depuis un nom de quartier (sans GPS).
+    Utilisé quand l'adresse de rue est absente ou le géocodage a échoué.
+    """
+    from src.utils.config import DATA_PROCESSED_DIR
+
+    iris_stats_path = DATA_PROCESSED_DIR / "train_test_split" / "iris_stats.parquet"
+    if not iris_stats_path.exists():
+        logger.warning("⚠ iris_stats.parquet introuvable — relancer make data-features && make train")
+        return appart
+
+    code_iris = _fuzzy_match_iris(quartier)
+    if not code_iris:
+        return appart
+
+    iris_stats = pd.read_parquet(iris_stats_path)
+    row = iris_stats[iris_stats["code_iris"] == code_iris]
+    if not row.empty:
+        object.__setattr__(appart, "prix_m2_median_quartier", float(row["prix_m2_median_quartier"].iloc[0]))
+        object.__setattr__(appart, "nb_ventes_quartier", int(row["nb_ventes_quartier"].iloc[0]))
+        logger.info(
+            f"✓ Stats IRIS (fuzzy) : médiane={row['prix_m2_median_quartier'].iloc[0]:.0f} €/m², "
+            f"n={row['nb_ventes_quartier'].iloc[0]} ventes ({code_iris})"
+        )
+    return appart
 
 
 def _enrich_with_spatial_features(
@@ -247,16 +309,7 @@ def _enrich_with_spatial_features(
 ) -> AppartementInput:
     """
     Enrichir un AppartementInput avec les features spatiales
-    calculées depuis les fichiers précalculés (transport, PPRI, IRIS).
-
-    Args:
-        appart: Input à enrichir
-        lat: Latitude WGS-84
-        lon: Longitude WGS-84
-        quartier: Nom de quartier extrait de l'annonce (fallback IRIS)
-
-    Returns:
-        AppartementInput enrichi (nouvelles valeurs si fichiers disponibles)
+    calculées depuis les fichiers précalculés (transport, PPRI, IRIS par GPS).
     """
     import geopandas as gpd
     from shapely.geometry import Point
@@ -275,24 +328,20 @@ def _enrich_with_spatial_features(
             geometry=gpd.points_from_xy(transport["lon"], transport["lat"]),
             crs=EPSG_WGS84,
         ).to_crs(EPSG_LAMBERT)
-
         pt_lambert = gpd.GeoSeries([point_wgs84], crs=EPSG_WGS84).to_crs(EPSG_LAMBERT).iloc[0]
-
         for transport_type, field in [("tram", "distance_tram_proche_m"), ("gare", "distance_gare_proche_m")]:
             subset = gdf_transport[gdf_transport["type"] == transport_type]
             if not subset.empty:
-                dist = float(subset.geometry.distance(pt_lambert).min())
-                object.__setattr__(appart, field, dist)
+                object.__setattr__(appart, field, float(subset.geometry.distance(pt_lambert).min()))
 
     # --- Zone inondable ---
     ppri_path = DATA_RAW_DIR / "ppri" / "zones_inondables_49.geojson"
     if ppri_path.exists():
         ppri = gpd.read_file(ppri_path).to_crs(EPSG_LAMBERT)
         pt_lambert = gpd.GeoSeries([point_wgs84], crs=EPSG_WGS84).to_crs(EPSG_LAMBERT).iloc[0]
-        in_flood_zone = int(ppri.geometry.contains(pt_lambert).any())
-        object.__setattr__(appart, "zone_inondable", in_flood_zone)
+        object.__setattr__(appart, "zone_inondable", int(ppri.geometry.contains(pt_lambert).any()))
 
-    # --- Stats quartier IRIS (depuis iris_stats.parquet produit par split.py) ---
+    # --- Stats IRIS par GPS ---
     iris_stats_path = DATA_PROCESSED_DIR / "train_test_split" / "iris_stats.parquet"
     if iris_stats_path.exists():
         code_iris = _resolve_code_iris(lat, lon, quartier)
@@ -303,7 +352,7 @@ def _enrich_with_spatial_features(
                 object.__setattr__(appart, "prix_m2_median_quartier", float(row["prix_m2_median_quartier"].iloc[0]))
                 object.__setattr__(appart, "nb_ventes_quartier", int(row["nb_ventes_quartier"].iloc[0]))
                 logger.info(
-                    f"✓ Stats IRIS : médiane={row['prix_m2_median_quartier'].iloc[0]:.0f} €/m², "
+                    f"✓ Stats IRIS (GPS) : médiane={row['prix_m2_median_quartier'].iloc[0]:.0f} €/m², "
                     f"n={row['nb_ventes_quartier'].iloc[0]} ventes ({code_iris})"
                 )
     else:
