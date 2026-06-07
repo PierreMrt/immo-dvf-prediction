@@ -77,14 +77,14 @@ if mode == "📊 Explorer le marché":
     # Graphiques
     col_left, col_right = st.columns(2)
     with col_left:
-        st.plotly_chart(plot_prix_distribution(df_filtered), use_container_width=True)
+        st.plotly_chart(plot_prix_distribution(df_filtered), width="stretch")
     with col_right:
         if "nom_iris" in df_filtered.columns:
-            st.plotly_chart(plot_prix_par_quartier(df_filtered), use_container_width=True)
+            st.plotly_chart(plot_prix_par_quartier(df_filtered), width="stretch")
         else:
             st.info("Données IRIS non disponibles (lancer make data-full).")
 
-    st.plotly_chart(plot_evolution_prix(df_filtered), use_container_width=True)
+    st.plotly_chart(plot_evolution_prix(df_filtered), width="stretch")
 
     # Tableau stats par quartier
     if "nom_iris" in df_filtered.columns:
@@ -96,7 +96,7 @@ if mode == "📊 Explorer le marché":
             .sort_values("mediane", ascending=False)
             .reset_index()
         )
-        st.dataframe(stats, use_container_width=True)
+        st.dataframe(stats, width="stretch")
 
 # -------------------------------------------------------------------
 # SECTION 2 — Analyser une annonce (agent IA)
@@ -157,7 +157,7 @@ elif mode == "🔎 Analyser une annonce":
 
                 st.plotly_chart(
                     plot_comparaison_annonce(prix_m2_annonce, result.prix_m2_predit),
-                    use_container_width=True,
+                    width="stretch",
                 )
         else:
             st.warning("Surface ou nombre de pièces non détectés. Utiliser la saisie manuelle.")
@@ -206,5 +206,5 @@ elif mode == "🔮 Saisie manuelle":
             prix_m2_annonce = prix_annonce / surface
             st.plotly_chart(
                 plot_comparaison_annonce(prix_m2_annonce, result.prix_m2_predit),
-                use_container_width=True,
+                width="stretch",
             )
